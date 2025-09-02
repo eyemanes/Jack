@@ -157,41 +157,65 @@ app.get('/api/calls', async (req, res) => {
     // Sort calls by creation date (newest first)
     calls.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     
-    // Transform the data to match frontend expectations
-    const transformedCalls = calls.map(call => ({
-      id: call.id,
-      contractAddress: call.contractAddress,
-      createdAt: call.createdAt,
-      updatedAt: call.updatedAt,
-      token: {
-        name: call.tokenName,
-        symbol: call.tokenSymbol,
-        contractAddress: call.contractAddress
-      },
-      user: {
-        id: call.userId,
-        username: call.username,
-        firstName: call.firstName,
-        lastName: call.lastName,
-        displayName: call.username || call.firstName || 'Anonymous'
-      },
-      prices: {
-        entry: call.entryPrice,
-        current: call.currentPrice,
-        entryMarketCap: call.entryMarketCap,
-        currentMarketCap: call.currentMarketCap
-      },
-      performance: {
-        pnlPercent: call.pnlPercent || 0,
-        score: call.score || 0,
-        isEarlyCall: call.isEarlyCall || false,
-        callRank: call.callRank || 1
-      },
-      marketData: {
-        liquidity: call.currentLiquidity,
-        volume24h: call.current24hVolume
+    // Get linking codes to check for Twitter accounts
+    const linkingCodesRef = ref(database, 'linkingCodes');
+    const linkingSnapshot = await get(linkingCodesRef);
+    const linkingCodes = linkingSnapshot.exists() ? linkingSnapshot.val() : {};
+    
+    // Create a map of Telegram usernames to Twitter usernames
+    const telegramToTwitterMap = {};
+    for (const [code, data] of Object.entries(linkingCodes)) {
+      if (data.isUsed === true && data.telegramUsername && data.twitterUsername) {
+        telegramToTwitterMap[data.telegramUsername] = {
+          twitterUsername: data.twitterUsername,
+          twitterName: data.twitterName,
+          twitterId: data.twitterId
+        };
       }
-    }));
+    }
+
+    // Transform the data to match frontend expectations
+    const transformedCalls = calls.map(call => {
+      // Check if this user has a linked Twitter account
+      const twitterInfo = telegramToTwitterMap[call.username];
+      
+      return {
+        id: call.id,
+        contractAddress: call.contractAddress,
+        createdAt: call.createdAt,
+        updatedAt: call.updatedAt,
+        token: {
+          name: call.tokenName,
+          symbol: call.tokenSymbol,
+          contractAddress: call.contractAddress
+        },
+        user: {
+          id: call.userId,
+          username: call.username,
+          firstName: call.firstName,
+          lastName: call.lastName,
+          displayName: twitterInfo ? `@${twitterInfo.twitterUsername}` : (call.username || call.firstName || 'Anonymous'),
+          isLinked: !!twitterInfo,
+          twitterInfo: twitterInfo || null
+        },
+        prices: {
+          entry: call.entryPrice,
+          current: call.currentPrice,
+          entryMarketCap: call.entryMarketCap,
+          currentMarketCap: call.currentMarketCap
+        },
+        performance: {
+          pnlPercent: call.pnlPercent || 0,
+          score: call.score || 0,
+          isEarlyCall: call.isEarlyCall || false,
+          callRank: call.callRank || 1
+        },
+        marketData: {
+          liquidity: call.currentLiquidity,
+          volume24h: call.current24hVolume
+        }
+      };
+    });
     
     res.json({ success: true, data: transformedCalls });
   } catch (error) {
@@ -546,6 +570,79 @@ app.post('/api/generate-linking-code', async (req, res) => {
   } catch (error) {
     console.error('❌ Error generating linking code:', error);
     console.error('❌ Error stack:', error.stack);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get user's calls by Twitter ID
+app.get('/api/user-calls/:twitterId', async (req, res) => {
+  try {
+    const { twitterId } = req.params;
+    console.log(`🔍 Fetching calls for Twitter ID: ${twitterId}`);
+    
+    // Get linking codes to find Telegram username
+    const linkingCodesRef = ref(database, 'linkingCodes');
+    const linkingSnapshot = await get(linkingCodesRef);
+    const linkingCodes = linkingSnapshot.exists() ? linkingSnapshot.val() : {};
+    
+    // Find Telegram username for this Twitter ID
+    let telegramUsername = null;
+    for (const [code, data] of Object.entries(linkingCodes)) {
+      if (data.twitterId === twitterId && data.isUsed === true && data.telegramUsername) {
+        telegramUsername = data.telegramUsername;
+        break;
+      }
+    }
+    
+    if (!telegramUsername) {
+      console.log(`❌ No linked Telegram account found for Twitter ID: ${twitterId}`);
+      return res.json({ success: true, data: [] });
+    }
+    
+    // Get all calls and filter by Telegram username
+    const calls = await db.getAllActiveCalls();
+    const userCalls = calls.filter(call => call.username === telegramUsername);
+    
+    // Transform the data
+    const transformedCalls = userCalls.map(call => ({
+      id: call.id,
+      contractAddress: call.contractAddress,
+      createdAt: call.createdAt,
+      updatedAt: call.updatedAt,
+      token: {
+        name: call.tokenName,
+        symbol: call.tokenSymbol,
+        contractAddress: call.contractAddress
+      },
+      user: {
+        id: call.userId,
+        username: call.username,
+        firstName: call.firstName,
+        lastName: call.lastName,
+        displayName: `@${telegramUsername}`
+      },
+      prices: {
+        entry: call.entryPrice,
+        current: call.currentPrice,
+        entryMarketCap: call.entryMarketCap,
+        currentMarketCap: call.currentMarketCap
+      },
+      performance: {
+        pnlPercent: call.pnlPercent || 0,
+        score: call.score || 0,
+        isEarlyCall: call.isEarlyCall || false,
+        callRank: call.callRank || 1
+      },
+      marketData: {
+        liquidity: call.currentLiquidity,
+        volume24h: call.current24hVolume
+      }
+    }));
+    
+    console.log(`✅ Found ${transformedCalls.length} calls for Twitter ID: ${twitterId}`);
+    res.json({ success: true, data: transformedCalls });
+  } catch (error) {
+    console.error('Error fetching user calls:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
