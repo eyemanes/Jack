@@ -149,6 +149,9 @@ app.get('/api/calls', async (req, res) => {
       }
     }
     
+    // Sort calls by creation date (newest first)
+    calls.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    
     // Transform the data to match frontend expectations
     const transformedCalls = calls.map(call => ({
       id: call.id,
@@ -531,6 +534,124 @@ app.post('/api/recalculate-scores', async (req, res) => {
     });
   } catch (error) {
     console.error('Error recalculating scores:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Refresh all token data and update PnL/score
+app.post('/api/refresh-all', async (req, res) => {
+  try {
+    console.log('🔄 Refresh all endpoint called');
+    
+    const calls = await db.getAllActiveCalls();
+    let refreshedCount = 0;
+    let errorCount = 0;
+    
+    // Process all calls in parallel for better performance
+    const refreshPromises = calls.map(async (call) => {
+      try {
+        console.log(`Refreshing token data for: ${call.contractAddress}`);
+        
+        // Fetch fresh token data from Solana Tracker API
+        const tokenData = await solanaService.getTokenData(call.contractAddress);
+        if (!tokenData) {
+          console.log(`No token data found for: ${call.contractAddress}`);
+          return { success: false, contractAddress: call.contractAddress, error: 'Token data not found' };
+        }
+        
+        // Update call with current data
+        await db.updateCall(call.id, {
+          currentPrice: tokenData.price,
+          currentMarketCap: tokenData.marketCap,
+          currentLiquidity: tokenData.liquidity,
+          current24hVolume: tokenData.volume24h
+        });
+        
+        // Calculate PnL - use ATH only if it was reached AFTER the call
+        let pnlPercent = 0;
+        let bestMarketCap = tokenData.marketCap; // Default to current market cap
+        
+        if (call.entryMarketCap && tokenData.marketCap) {
+          // Check if ATH is available and higher than current market cap
+          if (tokenData.ath && tokenData.ath > tokenData.marketCap) {
+            // Check if ATH timestamp is available
+            if (tokenData.athTimestamp) {
+              const callTime = new Date(call.createdAt).getTime();
+              const athTime = new Date(tokenData.athTimestamp).getTime();
+              
+              if (athTime > callTime) {
+                // ATH reached AFTER call - use ATH for PnL
+                bestMarketCap = tokenData.ath;
+                console.log(`Using ATH for PnL calculation: $${tokenData.ath} (ATH reached after call)`);
+              } else {
+                // ATH reached BEFORE call - use current market cap for PnL
+                console.log(`ATH was reached before call, using current market cap: $${tokenData.marketCap}`);
+              }
+            } else {
+              // If no timestamp, use current market cap to be safe
+              console.log(`No ATH timestamp available, using current market cap: $${tokenData.marketCap}`);
+            }
+          }
+          
+          pnlPercent = ((bestMarketCap - call.entryMarketCap) / call.entryMarketCap) * 100;
+        }
+        
+        // Calculate and update score
+        const score = calculateScore(pnlPercent, call.entryMarketCap, call.callRank || 1);
+        
+        // Update PnL and score in database
+        await db.updateCall(call.id, {
+          pnlPercent: pnlPercent,
+          score: score
+        });
+        
+        console.log(`✅ Refreshed ${call.contractAddress}: PnL ${pnlPercent.toFixed(2)}%, Score ${score.toFixed(1)}`);
+        return { 
+          success: true, 
+          contractAddress: call.contractAddress,
+          pnlPercent,
+          score,
+          currentPrice: tokenData.price,
+          currentMarketCap: tokenData.marketCap
+        };
+      } catch (error) {
+        console.error(`❌ Error refreshing ${call.contractAddress}:`, error.message);
+        return { 
+          success: false, 
+          contractAddress: call.contractAddress, 
+          error: error.message 
+        };
+      }
+    });
+    
+    // Wait for all refresh operations to complete
+    const results = await Promise.all(refreshPromises);
+    
+    // Count successful and failed refreshes
+    results.forEach(result => {
+      if (result.success) {
+        refreshedCount++;
+      } else {
+        errorCount++;
+      }
+    });
+    
+    const responseData = {
+      success: true,
+      message: `Refreshed ${refreshedCount} tokens successfully, ${errorCount} failed`,
+      data: {
+        totalCalls: calls.length,
+        refreshedCount,
+        errorCount,
+        results: results.filter(r => r.success), // Only return successful results
+        errors: results.filter(r => !r.success) // Only return failed results
+      }
+    };
+    
+    console.log(`🎯 Refresh all completed: ${refreshedCount} successful, ${errorCount} failed`);
+    res.json(responseData);
+  } catch (error) {
+    console.error('Error refreshing all tokens:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
