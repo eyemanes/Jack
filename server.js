@@ -696,7 +696,8 @@ app.post('/api/refresh-all', async (req, res) => {
     let errorCount = 0;
     const results = [];
     
-    // Process each call with its corresponding batch data
+    // Step 1: Update market cap data immediately from batch results
+    console.log(`📊 Step 1: Updating market cap data for all tokens...`);
     for (const call of calls) {
       try {
         // Find the corresponding batch result
@@ -714,15 +715,47 @@ app.post('/api/refresh-all', async (req, res) => {
         }
         
         const tokenData = batchResult.data;
-        console.log(`🔄 Processing ${call.contractAddress}: ${tokenData.name} (${tokenData.symbol})`);
+        console.log(`🔄 Updating market data for ${call.contractAddress}: ${tokenData.name} (${tokenData.symbol})`);
         
-        // Update call with current data
+        // Update call with current market data only (no PnL/score calculation yet)
         await db.updateCall(call.id, {
           currentPrice: tokenData.price,
           currentMarketCap: tokenData.marketCap,
           currentLiquidity: tokenData.liquidity,
           current24hVolume: tokenData.volume24h
         });
+        
+        console.log(`✅ Updated market data for ${call.contractAddress}: Price $${tokenData.price}, MCap $${tokenData.marketCap}`);
+        
+      } catch (error) {
+        console.error(`❌ Error updating market data for ${call.contractAddress}:`, error.message);
+        results.push({
+          success: false,
+          contractAddress: call.contractAddress,
+          error: error.message
+        });
+        errorCount++;
+      }
+    }
+    
+    // Step 2: Calculate PnL and score individually with proper ATH logic
+    console.log(`🧮 Step 2: Calculating PnL and scores individually with ATH logic...`);
+    for (const call of calls) {
+      try {
+        // Skip if this call already failed in step 1
+        const existingResult = results.find(r => r.contractAddress === call.contractAddress && !r.success);
+        if (existingResult) {
+          continue;
+        }
+        
+        console.log(`🧮 Calculating PnL/Score for ${call.contractAddress}...`);
+        
+        // Fetch fresh token data individually to get proper ATH data
+        const tokenData = await solanaService.getTokenData(call.contractAddress);
+        if (!tokenData) {
+          console.log(`❌ Could not fetch individual token data for: ${call.contractAddress}`);
+          continue;
+        }
         
         // Calculate PnL - use ATH only if it was reached AFTER the call
         let pnlPercent = 0;
@@ -765,33 +798,35 @@ app.post('/api/refresh-all', async (req, res) => {
         // Update user's total score
         await recalculateUserTotalScore(call.userId);
         
-        console.log(`✅ Refreshed ${call.contractAddress}: PnL ${pnlPercent.toFixed(2)}%, Score ${score.toFixed(1)}`);
+        console.log(`✅ Calculated PnL/Score for ${call.contractAddress}: PnL ${pnlPercent.toFixed(2)}%, Score ${score.toFixed(1)}`);
         
-        results.push({
-          success: true,
-          contractAddress: call.contractAddress,
-          pnlPercent,
-          score,
-          currentPrice: tokenData.price,
-          currentMarketCap: tokenData.marketCap
-        });
+        // Update the result to show success
+        const resultIndex = results.findIndex(r => r.contractAddress === call.contractAddress);
+        if (resultIndex !== -1) {
+          results[resultIndex] = {
+            success: true,
+            contractAddress: call.contractAddress,
+            pnlPercent,
+            score,
+            currentPrice: tokenData.price,
+            currentMarketCap: tokenData.marketCap
+          };
+        }
         
         refreshedCount++;
         
+        // Add small delay to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 500));
+        
       } catch (error) {
-        console.error(`❌ Error processing ${call.contractAddress}:`, error.message);
-        results.push({
-          success: false,
-          contractAddress: call.contractAddress,
-          error: error.message
-        });
-        errorCount++;
+        console.error(`❌ Error calculating PnL/Score for ${call.contractAddress}:`, error.message);
+        // Don't increment errorCount here as market data was already updated
       }
     }
     
     const responseData = {
       success: true,
-      message: `Refreshed ${refreshedCount} tokens successfully, ${errorCount} failed (using batch API)`,
+      message: `Refreshed market data for all tokens, calculated PnL/Score for ${refreshedCount} tokens successfully, ${errorCount} failed (using hybrid batch + individual approach)`,
       data: {
         totalCalls: calls.length,
         refreshedCount,
@@ -801,7 +836,7 @@ app.post('/api/refresh-all', async (req, res) => {
       }
     };
     
-    console.log(`🎯 Batch refresh completed: ${refreshedCount} successful, ${errorCount} failed`);
+    console.log(`🎯 Hybrid refresh completed: Market data updated for all, PnL/Score calculated for ${refreshedCount} tokens, ${errorCount} failed`);
     res.json(responseData);
     
   } catch (error) {
