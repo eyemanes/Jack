@@ -2,7 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const { ref, set } = require('firebase/database');
+const { ref, set, get } = require('firebase/database');
 const FirebaseService = require('./services/FirebaseService');
 const SolanaTrackerService = require('./services/SolanaTrackerService');
 const { database } = require('./config/firebase');
@@ -546,6 +546,46 @@ app.post('/api/generate-linking-code', async (req, res) => {
   } catch (error) {
     console.error('❌ Error generating linking code:', error);
     console.error('❌ Error stack:', error.stack);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Check if Twitter account is linked to Telegram
+app.get('/api/check-telegram-link/:twitterId', async (req, res) => {
+  try {
+    const { twitterId } = req.params;
+    console.log(`🔍 Checking Telegram link status for Twitter ID: ${twitterId}`);
+    
+    // Check if there's a linking code that has been used for this Twitter ID
+    const linkingCodesRef = ref(database, 'linkingCodes');
+    const snapshot = await get(linkingCodesRef);
+    
+    if (snapshot.exists()) {
+      const linkingCodes = snapshot.val();
+      
+      // Look for any linking code that has been used and matches this Twitter ID
+      for (const [code, data] of Object.entries(linkingCodes)) {
+        if (data.twitterId === twitterId && data.isUsed === true) {
+          console.log(`✅ Found linked Telegram account for Twitter ID: ${twitterId}`);
+          return res.json({
+            success: true,
+            linked: true,
+            twitterId: twitterId,
+            linkedAt: data.linkedAt || data.updatedAt
+          });
+        }
+      }
+    }
+    
+    console.log(`❌ No linked Telegram account found for Twitter ID: ${twitterId}`);
+    res.json({
+      success: true,
+      linked: false,
+      twitterId: twitterId
+    });
+    
+  } catch (error) {
+    console.error('Error checking Telegram link status:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
