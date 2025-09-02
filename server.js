@@ -214,18 +214,104 @@ app.get('/api/calls/contract/:contractAddress', async (req, res) => {
   }
 });
 
+// Get calls by contract address (for frontend compatibility)
+app.get('/api/calls/:contractAddress', async (req, res) => {
+  try {
+    const { contractAddress } = req.params;
+    const call = await db.findCallByContractAddress(contractAddress);
+    
+    if (!call) {
+      return res.status(404).json({ success: false, error: 'Call not found' });
+    }
+
+    // Transform the data to match frontend expectations
+    const transformedCall = {
+      id: call.id,
+      contractAddress: call.contractAddress,
+      createdAt: call.createdAt,
+      updatedAt: call.updatedAt,
+      token: {
+        name: call.tokenName,
+        symbol: call.tokenSymbol,
+        contractAddress: call.contractAddress
+      },
+      user: {
+        id: call.userId,
+        username: call.username,
+        firstName: call.firstName,
+        lastName: call.lastName,
+        displayName: call.username || call.firstName || 'Anonymous'
+      },
+      prices: {
+        entry: call.entryPrice,
+        current: call.currentPrice,
+        entryMarketCap: call.entryMarketCap,
+        currentMarketCap: call.currentMarketCap
+      },
+      performance: {
+        pnlPercent: call.pnlPercent || 0,
+        score: call.score || 0,
+        isEarlyCall: call.isEarlyCall || false,
+        callRank: call.callRank || 1
+      },
+      marketData: {
+        liquidity: call.currentLiquidity,
+        volume24h: call.current24hVolume
+      },
+      timestamps: {
+        createdAt: call.createdAt,
+        updatedAt: call.updatedAt
+      }
+    };
+    
+    res.json({ success: true, data: transformedCall });
+  } catch (error) {
+    console.error('Error fetching call by contract:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Get leaderboard
 app.get('/api/leaderboard', async (req, res) => {
   try {
     const leaderboard = await db.getLeaderboard();
     
-    // Add rank to each user
-    const leaderboardWithRank = leaderboard.map((user, index) => ({
-      ...user,
-      rank: index + 1
+    // Calculate additional statistics for each user
+    const leaderboardWithStats = await Promise.all(leaderboard.map(async (user, index) => {
+      try {
+        // Get user's calls to calculate win rate and successful calls
+        const userCalls = await db.getCallsByUser(parseInt(user.id));
+        
+        // Calculate successful calls (calls with positive PnL or score > 0)
+        const successfulCalls = userCalls.filter(call => 
+          (call.pnlPercent && call.pnlPercent > 0) || (call.score && call.score > 0)
+        ).length;
+        
+        // Calculate win rate
+        const winRate = userCalls.length > 0 ? (successfulCalls / userCalls.length) * 100 : 0;
+        
+        return {
+          ...user,
+          rank: index + 1,
+          successfulCalls: successfulCalls,
+          winRate: winRate,
+          totalCalls: userCalls.length || user.totalCalls || 0,
+          totalScore: user.totalScore || 0
+        };
+      } catch (error) {
+        console.error(`Error calculating stats for user ${user.id}:`, error);
+        return {
+          ...user,
+          rank: index + 1,
+          successfulCalls: 0,
+          winRate: 0,
+          totalCalls: user.totalCalls || 0,
+          totalScore: user.totalScore || 0
+        };
+      }
     }));
     
-    res.json({ success: true, data: leaderboardWithRank });
+    res.json({ success: true, data: leaderboardWithStats });
   } catch (error) {
     console.error('Error fetching leaderboard:', error);
     res.status(500).json({ success: false, error: error.message });
@@ -261,6 +347,30 @@ app.get('/api/tokens/latest', async (req, res) => {
     res.json({ success: true, data: tokens });
   } catch (error) {
     console.error('Error fetching latest tokens:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get token snapshots (placeholder for frontend compatibility)
+app.get('/api/tokens/:contractAddress/snapshots', async (req, res) => {
+  try {
+    const { contractAddress } = req.params;
+    const { timeframe = '7d' } = req.query;
+    
+    // For now, return empty snapshots array
+    // This can be implemented later with actual historical data
+    const snapshots = [];
+    
+    res.json({ 
+      success: true, 
+      data: { 
+        contractAddress,
+        timeframe,
+        snapshots 
+      } 
+    });
+  } catch (error) {
+    console.error('Error fetching token snapshots:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
