@@ -195,6 +195,11 @@ app.get('/api/calls', async (req, res) => {
           firstName: call.firstName,
           lastName: call.lastName,
           displayName: twitterInfo ? `@${twitterInfo.twitterUsername}` : (call.username || call.firstName || 'Anonymous'),
+        twitterUsername: twitterInfo?.twitterUsername || null,
+        twitterName: twitterInfo?.twitterName || null,
+        twitterProfilePic: twitterInfo?.twitterUsername ? `https://unavatar.io/twitter/${twitterInfo.twitterUsername}` : null,
+        // Also try to get actual profile pic URL if stored in linking data
+        actualProfilePic: twitterInfo?.profilePictureUrl || null,
           isLinked: !!twitterInfo,
           twitterInfo: twitterInfo || null
         },
@@ -519,13 +524,14 @@ app.post('/api/generate-linking-code', async (req, res) => {
     console.log('📥 Request body:', req.body);
     console.log('📥 Request headers:', req.headers);
     
-    const { twitterId, twitterUsername, twitterName, linkingCode } = req.body;
+    const { twitterId, twitterUsername, twitterName, linkingCode, profilePictureUrl } = req.body;
     
     console.log('📊 Extracted data:', {
       twitterId,
       twitterUsername,
       twitterName,
-      linkingCode
+      linkingCode,
+      profilePictureUrl
     });
     
     // Validate required fields with detailed logging
@@ -563,6 +569,7 @@ app.post('/api/generate-linking-code', async (req, res) => {
       twitterId,
       twitterUsername,
       twitterName: twitterName || twitterUsername,
+      profilePictureUrl: profilePictureUrl || null,
       linkingCode,
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(), // 10 minutes
@@ -1083,10 +1090,10 @@ app.post('/api/recalculate-scores', async (req, res) => {
   }
 });
 
-// Optimized refresh all endpoint - fast market cap updates, smart PnL calculation
+// FIXED: Proper 3-step refresh process like single refresh
 app.post('/api/refresh-all', async (req, res) => {
   try {
-    console.log('⚡ OPTIMIZED refresh all endpoint called - lightning speed baby!');
+    console.log('⚡ FIXED 3-STEP refresh-all endpoint called!');
     
     const calls = await db.getAllActiveCalls();
     
@@ -1098,13 +1105,13 @@ app.post('/api/refresh-all', async (req, res) => {
       });
     }
     
-    console.log(`⚡ Processing ${calls.length} tokens with OPTIMIZED approach...`);
+    console.log(`🚀 Processing ${calls.length} calls with PROPER 3-step process...`);
     
     // Extract unique contract addresses for batch API
     const uniqueAddresses = [...new Set(calls.map(call => call.contractAddress))];
-    console.log(`🚀 Batch fetching ${uniqueAddresses.length} unique tokens...`);
+    console.log(`🔄 Step 1: Batch fetching ${uniqueAddresses.length} unique tokens...`);
     
-    // Step 1: FAST batch market cap updates
+    // Get batch token data
     const batchResults = await solanaService.getMultipleTokensData(uniqueAddresses);
     console.log(`📊 Batch API returned ${batchResults.length} results`);
     
@@ -1112,8 +1119,11 @@ app.post('/api/refresh-all', async (req, res) => {
     let skippedCount = 0;
     let errorCount = 0;
     
-    // Step 2: Update market caps instantly (no calculations yet)
+    // STEP 1: UPDATE MARKET CAPS (parallel, fast)
+    console.log('🔄 STEP 1: Updating all market caps in parallel...');
     const marketCapUpdates = [];
+    const validCalls = []; // Keep track of calls with valid data
+    
     for (const call of calls) {
       try {
         const batchResult = batchResults.find(result => result.address === call.contractAddress);
@@ -1125,7 +1135,10 @@ app.post('/api/refresh-all', async (req, res) => {
         
         const tokenData = batchResult.data;
         
-        // Quick market cap update - no PnL calculation yet
+        // Store both call and tokenData for next steps
+        validCalls.push({ call, tokenData });
+        
+        // STEP 1: Market cap update only
         marketCapUpdates.push(
           db.updateCall(call.id, {
             currentPrice: tokenData.price,
@@ -1136,38 +1149,27 @@ app.post('/api/refresh-all', async (req, res) => {
         );
         
       } catch (error) {
-        console.error(`❌ Error updating market data for ${call.contractAddress}:`, error.message);
+        console.error(`❌ Error in Step 1 for ${call.contractAddress}:`, error.message);
         errorCount++;
       }
     }
     
     // Execute all market cap updates in parallel
-    console.log(`⚡ Executing ${marketCapUpdates.length} market cap updates in parallel...`);
     await Promise.all(marketCapUpdates);
-    console.log('✅ All market caps updated instantly!');
+    console.log(`✅ STEP 1 COMPLETE: ${marketCapUpdates.length} market caps updated!`);
     
-    // Step 3: SMART PnL calculation - only update if needed
-    console.log('🧠 Starting SMART PnL calculation (skip if no significant change)...');
-    
+    // STEP 2: CALCULATE PnL (with smart skip logic)
+    console.log('🧮 STEP 2: Calculating PnL with smart skip logic...');
     const pnlUpdates = [];
-    const userScoreUpdates = new Set(); // Track which users need score recalculation
     
-    for (const call of calls) {
+    for (const { call, tokenData } of validCalls) {
       try {
-        const batchResult = batchResults.find(result => result.address === call.contractAddress);
-        
-        if (!batchResult || !batchResult.data) {
-          continue;
-        }
-        
-        const tokenData = batchResult.data;
-        
-        // Calculate new PnL
+        // Calculate PnL exactly like single refresh
         let pnlPercent = 0;
         let bestMarketCap = tokenData.marketCap;
         
         if (call.entryMarketCap && tokenData.marketCap) {
-          // Use ATH if available and reached after call
+          // Use ATH if available and reached after call (same logic as single refresh)
           if (tokenData.ath && tokenData.ath > tokenData.marketCap) {
             if (tokenData.athTimestamp) {
               const callTime = new Date(call.createdAt).getTime();
@@ -1182,34 +1184,47 @@ app.post('/api/refresh-all', async (req, res) => {
           pnlPercent = ((bestMarketCap - call.entryMarketCap) / call.entryMarketCap) * 100;
         }
         
-        // SMART SKIP LOGIC - only update if significant change
+        // SMART SKIP LOGIC - same as before but more efficient
         const currentPnL = call.pnlPercent || 0;
         const pnlDifference = Math.abs(pnlPercent - currentPnL);
-        
-        // Skip if:
-        // 1. Change is less than 5% AND token already above 200% (3x)
-        // 2. Token went from high (3x+) to lower but still positive
         const currentMultiplier = (currentPnL / 100) + 1;
         const newMultiplier = (pnlPercent / 100) + 1;
         
+        // Skip if no significant change on high multipliers
         if (currentMultiplier >= 3 && newMultiplier >= 1.5 && pnlDifference < 10) {
-          console.log(`⚡ SKIPPING ${call.contractAddress}: ${currentMultiplier.toFixed(1)}x → ${newMultiplier.toFixed(1)}x (no significant change)`);
           skippedCount++;
           continue;
         }
         
-        // Calculate new score
+        // Skip if minimal change
+        if (pnlDifference < 5 && Math.abs(currentMultiplier - newMultiplier) < 0.2) {
+          skippedCount++;
+          continue;
+        }
+        
+        // Store for Step 3
+        pnlUpdates.push({ call, tokenData, pnlPercent, bestMarketCap });
+        
+      } catch (error) {
+        console.error(`❌ Error in Step 2 for ${call.contractAddress}:`, error.message);
+        errorCount++;
+      }
+    }
+    
+    console.log(`✅ STEP 2 COMPLETE: ${pnlUpdates.length} PnL calculated, ${skippedCount} skipped`);
+    
+    // STEP 3: UPDATE PnL & SCORES (parallel)
+    console.log('🏆 STEP 3: Updating PnL and scores in parallel...');
+    const scoreUpdates = [];
+    const userScoreUpdates = new Set();
+    
+    for (const { call, tokenData, pnlPercent, bestMarketCap } of pnlUpdates) {
+      try {
+        // Calculate score exactly like single refresh
         const score = calculateScore(pnlPercent, call.entryMarketCap, call.callRank || 1);
         
-        // Only update if there's a meaningful change
-        const scoreDifference = Math.abs(score - (call.score || 0));
-        if (scoreDifference < 0.1 && pnlDifference < 5) {
-          skippedCount++;
-          continue;
-        }
-        
-        // Add to batch update
-        pnlUpdates.push(
+        // STEP 3: Update PnL and score
+        scoreUpdates.push(
           db.updateCall(call.id, {
             pnlPercent: pnlPercent,
             score: score
@@ -1219,34 +1234,32 @@ app.post('/api/refresh-all', async (req, res) => {
         userScoreUpdates.add(call.userId);
         refreshedCount++;
         
-        console.log(`🔄 UPDATING ${call.contractAddress}: ${currentMultiplier.toFixed(1)}x → ${newMultiplier.toFixed(1)}x, Score: ${(call.score || 0).toFixed(1)} → ${score.toFixed(1)}`);
+        console.log(`🔄 UPDATED ${call.contractAddress}: ${((call.pnlPercent || 0) / 100 + 1).toFixed(1)}x → ${((pnlPercent / 100) + 1).toFixed(1)}x`);
         
       } catch (error) {
-        console.error(`❌ Error calculating PnL for ${call.contractAddress}:`, error.message);
+        console.error(`❌ Error in Step 3 for ${call.contractAddress}:`, error.message);
         errorCount++;
       }
     }
     
-    // Execute PnL updates in parallel
-    if (pnlUpdates.length > 0) {
-      console.log(`⚡ Executing ${pnlUpdates.length} PnL updates in parallel...`);
-      await Promise.all(pnlUpdates);
-    }
+    // Execute all score updates in parallel
+    await Promise.all(scoreUpdates);
+    console.log(`✅ STEP 3 COMPLETE: ${scoreUpdates.length} scores updated!`);
     
-    // Update user scores for affected users only
+    // Update affected user total scores
     if (userScoreUpdates.size > 0) {
-      console.log(`🔄 Updating scores for ${userScoreUpdates.size} affected users...`);
-      const scoreUpdatePromises = Array.from(userScoreUpdates).map(userId => 
+      console.log(`🔄 Updating total scores for ${userScoreUpdates.size} users...`);
+      const userScorePromises = Array.from(userScoreUpdates).map(userId => 
         recalculateUserTotalScore(userId).catch(err => 
           console.error(`Error updating user ${userId}:`, err.message)
         )
       );
-      await Promise.all(scoreUpdatePromises);
+      await Promise.all(userScorePromises);
     }
     
     const responseData = {
       success: true,
-      message: `⚡ OPTIMIZED refresh completed! Market data: ALL, PnL/Score: ${refreshedCount} updated, ${skippedCount} skipped (smart logic)`,
+      message: `⚡ 3-STEP refresh completed! ${refreshedCount} updated, ${skippedCount} skipped, ${errorCount} errors`,
       data: {
         totalCalls: calls.length,
         refreshedCount,
@@ -1256,11 +1269,11 @@ app.post('/api/refresh-all', async (req, res) => {
       }
     };
     
-    console.log(`🎯 OPTIMIZED refresh completed in record time! ${refreshedCount} updated, ${skippedCount} skipped, ${errorCount} errors`);
+    console.log(`🎯 3-STEP refresh completed! Market caps: ALL, PnL/Score: ${refreshedCount}, Skipped: ${skippedCount}`);
     res.json(responseData);
     
   } catch (error) {
-    console.error('❌ Error in optimized refresh:', error);
+    console.error('❌ Error in 3-step refresh:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
