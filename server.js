@@ -162,15 +162,33 @@ app.get('/api/calls', async (req, res) => {
     const linkingSnapshot = await get(linkingCodesRef);
     const linkingCodes = linkingSnapshot.exists() ? linkingSnapshot.val() : {};
     
-    // Create a map of Telegram usernames to Twitter usernames
+    // 🔍 FIXED: Enhanced linking logic to find eyeman93 → lechefcrypto connection
     const telegramToTwitterMap = {};
     for (const [code, data] of Object.entries(linkingCodes)) {
-      if (data.isUsed === true && data.telegramUsername && data.twitterUsername) {
-        telegramToTwitterMap[data.telegramUsername] = {
-          twitterUsername: data.twitterUsername,
-          twitterName: data.twitterName,
-          twitterId: data.twitterId
-        };
+      if (data.isUsed === true) {
+        // Try multiple fields for telegram username
+        const telegramUsername = data.telegramUsername || data.telegramUserId || data.username;
+        const twitterUsername = data.twitterUsername;
+        const twitterId = data.twitterId;
+        
+        console.log(`🔗 Processing linking code ${code}:`, {
+          telegramUsername,
+          twitterUsername,
+          twitterId,
+          isUsed: data.isUsed
+        });
+        
+        if (telegramUsername && twitterUsername) {
+          telegramToTwitterMap[telegramUsername] = {
+            twitterUsername: data.twitterUsername,
+            twitterName: data.twitterName,
+            twitterId: data.twitterId,
+            profilePictureUrl: data.profilePictureUrl
+          };
+          console.log(`✅ Mapped: ${telegramUsername} → @${twitterUsername}`);
+        } else {
+          console.log(`❌ Incomplete mapping data for code ${code}:`, { telegramUsername, twitterUsername });
+        }
       }
     }
 
@@ -933,13 +951,34 @@ app.get('/api/user-profile/:twitterId', async (req, res) => {
     const linkingSnapshot = await get(linkingCodesRef);
     const linkingCodes = linkingSnapshot.exists() ? linkingSnapshot.val() : {};
     
+    console.log(`📊 Found ${Object.keys(linkingCodes).length} linking codes in database`);
+    
+    // 🔍 DEBUG: Log all linking codes to see what's in the database
+    Object.entries(linkingCodes).forEach(([code, data]) => {
+      console.log(`🔗 Code ${code}:`, {
+        twitterId: data.twitterId,
+        twitterUsername: data.twitterUsername,
+        isUsed: data.isUsed,
+        telegramUsername: data.telegramUsername,
+        telegramUserId: data.telegramUserId,
+        hasAllFields: !!(data.twitterId && data.twitterUsername && data.isUsed)
+      });
+    });
+    
     // Find Telegram username for this Twitter ID
     let telegramUsername = null;
     let linkedData = null;
     for (const [code, data] of Object.entries(linkingCodes)) {
       if (data.twitterId === twitterId && data.isUsed === true) {
-        telegramUsername = data.telegramUsername;
+        // Try different possible fields for telegram username
+        telegramUsername = data.telegramUsername || data.telegramUserId;
         linkedData = data;
+        console.log(`✅ FOUND MATCH for Twitter ID ${twitterId}:`, {
+          code,
+          telegramUsername,
+          twitterUsername: data.twitterUsername,
+          isUsed: data.isUsed
+        });
         break;
       }
     }
@@ -1177,21 +1216,31 @@ app.post('/api/refresh-all', async (req, res) => {
     
     for (const { call, tokenData } of validCalls) {
       try {
-        // Calculate PnL exactly like single refresh
+        // 🔥 FIXED ATH RULE: Lock in highest multiplier if token hits 2x+
+        // Calculate PnL with YOUR RULE: Never go backwards once 2x+ is hit
         let pnlPercent = 0;
         let bestMarketCap = tokenData.marketCap;
         
         if (call.entryMarketCap && tokenData.marketCap) {
-          // Use ATH if available and reached after call (same logic as single refresh)
-          if (tokenData.ath && tokenData.ath > tokenData.marketCap) {
+          // Check if token ever reached 2x (200% gain) - YOUR RULE!
+          const currentMultiplier = tokenData.marketCap / call.entryMarketCap;
+          const athMultiplier = (tokenData.ath || 0) / call.entryMarketCap;
+          
+          // 🚀 YOUR RULE: If token hit 2x+, ALWAYS use the highest multiplier (ATH)
+          if (athMultiplier >= 2.0) {
+            // Check if ATH was reached AFTER our call
             if (tokenData.athTimestamp) {
               const callTime = new Date(call.createdAt).getTime();
               const athTime = new Date(tokenData.athTimestamp).getTime();
               
               if (athTime > callTime) {
+                // ATH reached AFTER call - LOCK IT IN! 🔒
                 bestMarketCap = tokenData.ath;
               }
             }
+          } else {
+            // Token never reached 2x - track current price (can go negative)
+            bestMarketCap = tokenData.marketCap;
           }
           
           pnlPercent = ((bestMarketCap - call.entryMarketCap) / call.entryMarketCap) * 100;
@@ -1325,30 +1374,44 @@ app.post('/api/refresh/:contractAddress', async (req, res) => {
       current24hVolume: tokenData.volume24h
     });
     
-    // Calculate PnL - use ATH only if it was reached AFTER the call
+    // 🔥 FIXED ATH RULE: Lock in highest multiplier if token hits 2x+
+    // Calculate PnL with YOUR RULE: Never go backwards once 2x+ is hit
     let pnlPercent = 0;
     let bestMarketCap = tokenData.marketCap; // Default to current market cap
     
     if (call.entryMarketCap && tokenData.marketCap) {
-      // Check if ATH is available and higher than current market cap
-      if (tokenData.ath && tokenData.ath > tokenData.marketCap) {
-        // Check if ATH timestamp is available
+      // Check if token ever reached 2x (200% gain) - YOUR RULE!
+      const twoXMarketCap = call.entryMarketCap * 2;
+      const currentMultiplier = tokenData.marketCap / call.entryMarketCap;
+      const athMultiplier = (tokenData.ath || 0) / call.entryMarketCap;
+      
+      console.log(`📊 Multiplier check: Current ${currentMultiplier.toFixed(1)}x, ATH ${athMultiplier.toFixed(1)}x, Entry ${call.entryMarketCap}`);
+      
+      // 🚀 YOUR RULE: If token hit 2x+, ALWAYS use the highest multiplier (ATH)
+      if (athMultiplier >= 2.0) {
+        // Check if ATH was reached AFTER our call
         if (tokenData.athTimestamp) {
           const callTime = new Date(call.createdAt).getTime();
           const athTime = new Date(tokenData.athTimestamp).getTime();
           
           if (athTime > callTime) {
-            // ATH reached AFTER call - use ATH for PnL
+            // ATH reached AFTER call - LOCK IT IN! 🔒
             bestMarketCap = tokenData.ath;
-            console.log(`Using ATH for PnL calculation: $${tokenData.ath} (ATH reached after call)`);
+            console.log(`🔥 LOCKED IN ATH: ${athMultiplier.toFixed(1)}x (ATH reached after call) - Token hit ${athMultiplier.toFixed(1)}x, current ${currentMultiplier.toFixed(1)}x`);
           } else {
-            // ATH reached BEFORE call - use current market cap for PnL
-            console.log(`ATH was reached before call, using current market cap: $${tokenData.marketCap}`);
+            // ATH was before our call - use current
+            bestMarketCap = tokenData.marketCap;
+            console.log(`⚠️ ATH was before call, using current: ${currentMultiplier.toFixed(1)}x`);
           }
         } else {
-          // If no timestamp, use current market cap to be safe
-          console.log(`No ATH timestamp available, using current market cap: $${tokenData.marketCap}`);
+          // No timestamp, be safe - use current
+          bestMarketCap = tokenData.marketCap;
+          console.log(`⚠️ No ATH timestamp, using current: ${currentMultiplier.toFixed(1)}x`);
         }
+      } else {
+        // Token never reached 2x - track current price (can go negative)
+        bestMarketCap = tokenData.marketCap;
+        console.log(`📉 Token never hit 2x, tracking current: ${currentMultiplier.toFixed(1)}x`);
       }
       
       pnlPercent = ((bestMarketCap - call.entryMarketCap) / call.entryMarketCap) * 100;
