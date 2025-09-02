@@ -478,32 +478,72 @@ app.get('/api/test-score', (req, res) => {
 // Generate linking code for Twitter users
 app.post('/api/generate-linking-code', async (req, res) => {
   try {
+    console.log('🔗 Generate linking code endpoint called');
+    console.log('📥 Request body:', req.body);
+    console.log('📥 Request headers:', req.headers);
+    
     const { twitterId, twitterUsername, twitterName, linkingCode } = req.body;
     
-    if (!twitterId || !linkingCode) {
-      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    console.log('📊 Extracted data:', {
+      twitterId,
+      twitterUsername,
+      twitterName,
+      linkingCode
+    });
+    
+    // Validate required fields with detailed logging
+    if (!twitterId) {
+      console.error('❌ Missing twitterId:', twitterId);
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required field: twitterId',
+        received: { twitterId, twitterUsername, twitterName, linkingCode }
+      });
     }
+    
+    if (!linkingCode) {
+      console.error('❌ Missing linkingCode:', linkingCode);
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required field: linkingCode',
+        received: { twitterId, twitterUsername, twitterName, linkingCode }
+      });
+    }
+    
+    if (!twitterUsername) {
+      console.error('❌ Missing twitterUsername:', twitterUsername);
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required field: twitterUsername',
+        received: { twitterId, twitterUsername, twitterName, linkingCode }
+      });
+    }
+
+    console.log('✅ All required fields present, proceeding with Firebase storage...');
 
     // Store the linking code in Firebase
     const linkingData = {
       twitterId,
       twitterUsername,
-      twitterName,
+      twitterName: twitterName || twitterUsername,
       linkingCode,
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(), // 10 minutes
       isUsed: false
     };
 
+    console.log('📦 Linking data to store:', linkingData);
+
     // Store in Firebase under linkingCodes collection
     const linkingCodesRef = ref(db.db, `linkingCodes/${linkingCode}`);
     await set(linkingCodesRef, linkingData);
 
-    console.log(`Generated linking code ${linkingCode} for Twitter user @${twitterUsername}`);
+    console.log(`✅ Generated linking code ${linkingCode} for Twitter user @${twitterUsername}`);
     
     res.json({ success: true, data: { linkingCode } });
   } catch (error) {
-    console.error('Error generating linking code:', error);
+    console.error('❌ Error generating linking code:', error);
+    console.error('❌ Error stack:', error.stack);
     res.status(500).json({ success: false, error: error.message });
   }
 });
