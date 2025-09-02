@@ -475,7 +475,9 @@ app.post('/api/recalculate-scores', async (req, res) => {
 app.post('/api/refresh/:contractAddress', async (req, res) => {
   try {
     const { contractAddress } = req.params;
-    console.log(`Refreshing token data for: ${contractAddress}`);
+    console.log(`🔄 Refresh endpoint called for: ${contractAddress}`);
+    console.log(`📡 Request method: ${req.method}`);
+    console.log(`🌐 Request URL: ${req.url}`);
     
     // Get current call data
     const call = await db.findCallByContractAddress(contractAddress);
@@ -544,7 +546,7 @@ app.post('/api/refresh/:contractAddress', async (req, res) => {
     
     console.log(`Score calculated: ${score.toFixed(1)} points`);
     
-    res.json({ 
+    const responseData = { 
       success: true, 
       data: {
         contractAddress,
@@ -554,7 +556,10 @@ app.post('/api/refresh/:contractAddress', async (req, res) => {
         score,
         updatedAt: new Date().toISOString()
       }
-    });
+    };
+    
+    console.log(`✅ Refresh successful for ${contractAddress}:`, responseData);
+    res.json(responseData);
   } catch (error) {
     console.error('Error refreshing token data:', error);
     res.status(500).json({ success: false, error: error.message });
