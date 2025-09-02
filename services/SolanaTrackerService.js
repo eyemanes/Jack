@@ -142,13 +142,17 @@ class SolanaTrackerService {
       console.log(`Fetching batch data for ${contractAddresses.length} tokens using multi endpoint`);
       
       // Use the batch API endpoint for better performance
+      console.log(`🔍 Calling batch API with ${contractAddresses.length} tokens:`, contractAddresses);
       const response = await this.axiosInstance.post(`${this.baseUrl}/tokens/multi`, {
         tokens: contractAddresses
       });
       
+      console.log(`📡 Batch API response status:`, response.status);
+      console.log(`📡 Batch API response data:`, response.data);
+      
       if (!response.data || !response.data.tokens) {
-        console.log('No batch data received from API');
-        return [];
+        console.log('❌ No batch data received from API - falling back to individual requests');
+        return await this.getMultipleTokensDataFallback(contractAddresses);
       }
       
       const results = [];

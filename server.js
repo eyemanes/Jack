@@ -682,9 +682,15 @@ app.post('/api/refresh-all', async (req, res) => {
     const contractAddresses = calls.map(call => call.contractAddress);
     
     // Use batch API for much faster data fetching
+    console.log(`🔍 Calling batch API for ${contractAddresses.length} tokens:`, contractAddresses);
     const batchResults = await solanaService.getMultipleTokensData(contractAddresses);
     
     console.log(`📈 Batch API returned data for ${batchResults.length} tokens`);
+    console.log(`📊 Batch results:`, batchResults.map(r => ({ 
+      address: r.address, 
+      hasData: !!r.data, 
+      error: r.error 
+    })));
     
     let refreshedCount = 0;
     let errorCount = 0;
