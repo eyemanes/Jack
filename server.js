@@ -395,6 +395,68 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
+// Test scoring endpoint for debugging
+app.get('/api/test-score', (req, res) => {
+  try {
+    const { pnl, marketCap } = req.query;
+    const pnlPercent = parseFloat(pnl) || 0;
+    const entryMarketCap = parseFloat(marketCap) || 100000;
+    
+    const score = calculateScore(pnlPercent, entryMarketCap);
+    
+    res.json({
+      success: true,
+      data: {
+        pnlPercent,
+        entryMarketCap,
+        multiplier: (pnlPercent / 100) + 1,
+        score,
+        explanation: {
+          multiplier: `${pnlPercent}% = ${((pnlPercent / 100) + 1).toFixed(3)}x`,
+          baseScore: score >= 0 ? 'Positive score' : 'Negative score',
+          marketCapMultiplier: score > 0 ? 'Applied' : 'Not applied (negative score)'
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error testing score:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Generate linking code for Twitter users
+app.post('/api/generate-linking-code', async (req, res) => {
+  try {
+    const { twitterId, twitterUsername, twitterName, linkingCode } = req.body;
+    
+    if (!twitterId || !linkingCode) {
+      return res.status(400).json({ success: false, error: 'Missing required fields' });
+    }
+
+    // Store the linking code in Firebase
+    const linkingData = {
+      twitterId,
+      twitterUsername,
+      twitterName,
+      linkingCode,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000).toISOString(), // 10 minutes
+      isUsed: false
+    };
+
+    // Store in Firebase under linkingCodes collection
+    const linkingCodesRef = ref(db.db, `linkingCodes/${linkingCode}`);
+    await set(linkingCodesRef, linkingData);
+
+    console.log(`Generated linking code ${linkingCode} for Twitter user @${twitterUsername}`);
+    
+    res.json({ success: true, data: { linkingCode } });
+  } catch (error) {
+    console.error('Error generating linking code:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Recalculate all scores endpoint
 app.post('/api/recalculate-scores', async (req, res) => {
   try {
