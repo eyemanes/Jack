@@ -2,8 +2,10 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
+const { ref, set } = require('firebase/database');
 const FirebaseService = require('./services/FirebaseService');
 const SolanaTrackerService = require('./services/SolanaTrackerService');
+const { database } = require('./config/firebase');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -535,7 +537,7 @@ app.post('/api/generate-linking-code', async (req, res) => {
     console.log('📦 Linking data to store:', linkingData);
 
     // Store in Firebase under linkingCodes collection
-    const linkingCodesRef = ref(db.db, `linkingCodes/${linkingCode}`);
+    const linkingCodesRef = ref(database, `linkingCodes/${linkingCode}`);
     await set(linkingCodesRef, linkingData);
 
     console.log(`✅ Generated linking code ${linkingCode} for Twitter user @${twitterUsername}`);
