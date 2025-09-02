@@ -59,7 +59,9 @@ function calculateScore(pnlPercent, entryMarketCap, callRank = 1) {
     } else {
       marketCapMultiplier = 1.5; // Above $1M MC: ×1.5 (50% bonus points)
     }
-    console.log(`Debug: Market cap $${entryMarketCap} = ${marketCapMultiplier}x multiplier`);
+    console.log(`Debug: Market cap $${entryMarketCap} = ${marketCapMultiplier}x multiplier (positive score)`);
+  } else {
+    console.log(`Debug: Market cap multiplier not applied (negative/zero score: ${baseScore})`);
   }
   
   const finalScore = baseScore * marketCapMultiplier;
