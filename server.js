@@ -915,6 +915,77 @@ app.post('/api/save-banner-url', async (req, res) => {
   }
 });
 
+// 🔧 DEBUG: Endpoint to debug linking issues
+app.get('/api/debug-linking/:twitterId', async (req, res) => {
+  try {
+    const { twitterId } = req.params;
+    console.log(`🔍 DEBUG: Checking linking for Twitter ID: ${twitterId}`);
+    
+    // Get all linking codes
+    const linkingCodesRef = ref(database, 'linkingCodes');
+    const linkingSnapshot = await get(linkingCodesRef);
+    const linkingCodes = linkingSnapshot.exists() ? linkingSnapshot.val() : {};
+    
+    console.log(`📋 DEBUG: Total linking codes: ${Object.keys(linkingCodes).length}`);
+    
+    const debugInfo = {
+      requestedTwitterId: twitterId,
+      totalLinkingCodes: Object.keys(linkingCodes).length,
+      matchingCodes: [],
+      allCodes: []
+    };
+    
+    // Check all linking codes
+    Object.entries(linkingCodes).forEach(([code, data]) => {
+      const codeInfo = {
+        code,
+        twitterId: data.twitterId,
+        twitterUsername: data.twitterUsername,
+        telegramUsername: data.telegramUsername,
+        isUsed: data.isUsed,
+        matches: data.twitterId === twitterId && data.isUsed === true
+      };
+      
+      debugInfo.allCodes.push(codeInfo);
+      
+      if (codeInfo.matches) {
+        debugInfo.matchingCodes.push(codeInfo);
+        console.log(`✅ DEBUG: FOUND MATCH!`, codeInfo);
+      }
+    });
+    
+    // Check if we found any matches
+    const isLinked = debugInfo.matchingCodes.length > 0;
+    const telegramUsername = isLinked ? debugInfo.matchingCodes[0].telegramUsername : null;
+    
+    // If linked, get call data
+    let callData = [];
+    if (isLinked && telegramUsername) {
+      const calls = await db.getAllActiveCalls();
+      callData = calls.filter(call => call.username === telegramUsername);
+      console.log(`📊 DEBUG: Found ${callData.length} calls for ${telegramUsername}`);
+    }
+    
+    const result = {
+      success: true,
+      debug: {
+        ...debugInfo,
+        isLinked,
+        linkedTelegramUsername: telegramUsername,
+        totalCallsFound: callData.length,
+        sampleCall: callData[0] || null
+      }
+    };
+    
+    console.log(`🔍 DEBUG RESULT:`, JSON.stringify(result, null, 2));
+    res.json(result);
+    
+  } catch (error) {
+    console.error('Error in debug linking endpoint:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Get user banner endpoint
 app.get('/api/user-banner/:twitterId', async (req, res) => {
   try {
