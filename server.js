@@ -541,7 +541,7 @@ async function autoRecalculateScores() {
   }
 }
 
-// Start server (only in development)
+// Start server (only in development - Vercel handles production)
 if (process.env.NODE_ENV !== 'production') {
   app.listen(PORT, async () => {
     console.log(`🚀 Solana Tracker API server running on port ${PORT}`);
@@ -551,6 +551,10 @@ if (process.env.NODE_ENV !== 'production') {
     // Auto-recalculate scores on startup
     await autoRecalculateScores();
   });
+} else {
+  // In production (Vercel), just run auto-recalculation
+  console.log('🚀 Running in production mode (Vercel)');
+  autoRecalculateScores().catch(console.error);
 }
 
 module.exports = app;
