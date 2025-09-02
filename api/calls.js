@@ -1,57 +1,64 @@
-// Calls endpoint for Vercel
+// Calls endpoint for Vercel - now using Firebase
+const FirebaseService = require('../services/FirebaseService');
 
-// Simple mock data for now (since SQLite won't work on Vercel)
-const mockCalls = [
-  {
-    id: 1,
-    contractAddress: "mock-address-1",
-    createdAt: new Date().toISOString(),
-    token: {
-      name: "Mock Token 1",
-      symbol: "MOCK1",
-      contractAddress: "mock-address-1"
-    },
-    user: {
-      id: 1,
-      username: "testuser",
-      displayName: "Test User"
-    },
-    prices: {
-      entry: 0.001,
-      current: 0.002,
-      entryMarketCap: 10000,
-      currentMarketCap: 20000
-    },
-    performance: {
-      pnlPercent: 100,
-      score: 5,
-      isEarlyCall: true,
-      callRank: 1
-    },
-    marketData: {
-      liquidity: 5000,
-      volume24h: 1000
-    }
-  }
-];
+const db = new FirebaseService();
 
-module.exports = (req, res) => {
+module.exports = async (req, res) => {
   try {
     // Enable CORS
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
     
     if (req.method === 'OPTIONS') {
       res.status(200).end();
       return;
     }
     
+    const calls = await db.getAllActiveCalls();
+    
+    // Transform the data to match frontend expectations
+    const transformedCalls = calls.map(call => ({
+      id: call.id,
+      contractAddress: call.contractAddress,
+      createdAt: call.createdAt,
+      updatedAt: call.updatedAt,
+      token: {
+        name: call.tokenName,
+        symbol: call.tokenSymbol,
+        contractAddress: call.contractAddress
+      },
+      user: {
+        id: call.userId,
+        username: call.username,
+        firstName: call.firstName,
+        lastName: call.lastName,
+        displayName: call.username || call.firstName || 'Anonymous'
+      },
+      prices: {
+        entry: call.entryPrice,
+        current: call.currentPrice,
+        entryMarketCap: call.entryMarketCap,
+        currentMarketCap: call.currentMarketCap
+      },
+      performance: {
+        pnlPercent: call.pnlPercent || 0,
+        score: call.score || 0,
+        isEarlyCall: call.isEarlyCall || false,
+        callRank: call.callRank || 1
+      },
+      marketData: {
+        liquidity: call.currentLiquidity,
+        volume24h: call.current24hVolume
+      }
+    }));
+    
     res.status(200).json({ 
       success: true, 
-      data: mockCalls 
+      data: transformedCalls 
     });
   } catch (error) {
+    console.error('Error fetching calls:', error);
     res.status(500).json({ 
       success: false, 
       error: error.message 

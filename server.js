@@ -1,7 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const SolanaTrackerDB = require('../bot/database');
+const FirebaseService = require('./services/FirebaseService');
 const SolanaTrackerService = require('./services/SolanaTrackerService');
 
 const app = express();
@@ -11,8 +11,8 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json());
 
-// Initialize database and service
-const db = new SolanaTrackerDB();
+// Initialize Firebase database and service
+const db = new FirebaseService();
 const solanaService = new SolanaTrackerService();
 
 // Helper function to calculate score (multiplier-based system)
@@ -74,7 +74,7 @@ app.get('/api/health', (req, res) => {
 // Get all active calls
 app.get('/api/calls', async (req, res) => {
   try {
-    const calls = db.getAllActiveCalls();
+    const calls = await db.getAllActiveCalls();
     
     // Refresh data for calls that have null current prices
     for (const call of calls) {
@@ -86,7 +86,7 @@ app.get('/api/calls', async (req, res) => {
           const tokenData = await solanaService.getTokenData(call.contractAddress);
           if (tokenData) {
             // Update call with current data
-            db.updateCall(call.id, {
+            await db.updateCall(call.id, {
               currentPrice: tokenData.price,
               currentMarketCap: tokenData.marketCap,
               currentLiquidity: tokenData.liquidity,
@@ -127,12 +127,10 @@ app.get('/api/calls', async (req, res) => {
             const score = calculateScore(pnlPercent, call.entryMarketCap, call.callRank || 1);
             
             // Update PnL and score in database
-            const updateStmt = db.db.prepare(`
-              UPDATE calls 
-              SET pnlPercent = ?, score = ?, updatedAt = datetime('now')
-              WHERE id = ?
-            `);
-            updateStmt.run(pnlPercent, score, call.id);
+            await db.updateCall(call.id, {
+              pnlPercent: pnlPercent,
+              score: score
+            });
             
             // Update the call object with new data
             call.currentPrice = tokenData.price;
@@ -195,7 +193,7 @@ app.get('/api/calls', async (req, res) => {
 app.get('/api/calls/user/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
-    const calls = db.getCallsByUser(parseInt(userId));
+    const calls = await db.getCallsByUser(parseInt(userId));
     res.json({ success: true, data: calls });
   } catch (error) {
     console.error('Error fetching user calls:', error);
@@ -207,7 +205,7 @@ app.get('/api/calls/user/:userId', async (req, res) => {
 app.get('/api/calls/contract/:contractAddress', async (req, res) => {
   try {
     const { contractAddress } = req.params;
-    const call = db.findCallByContractAddress(contractAddress);
+    const call = await db.findCallByContractAddress(contractAddress);
     res.json({ success: true, data: call });
   } catch (error) {
     console.error('Error fetching call by contract:', error);
@@ -218,7 +216,7 @@ app.get('/api/calls/contract/:contractAddress', async (req, res) => {
 // Get leaderboard
 app.get('/api/leaderboard', async (req, res) => {
   try {
-    const leaderboard = db.getLeaderboard();
+    const leaderboard = await db.getLeaderboard();
     
     // Add rank to each user
     const leaderboardWithRank = leaderboard.map((user, index) => ({
@@ -237,8 +235,8 @@ app.get('/api/leaderboard', async (req, res) => {
 app.get('/api/tokens/:contractAddress', async (req, res) => {
   try {
     const { contractAddress } = req.params;
-    const token = db.findTokenByContractAddress(contractAddress);
-    const call = db.findCallByContractAddress(contractAddress);
+    const token = await db.findTokenByContractAddress(contractAddress);
+    const call = await db.findCallByContractAddress(contractAddress);
     
     res.json({ 
       success: true, 
@@ -258,7 +256,7 @@ app.get('/api/tokens/:contractAddress', async (req, res) => {
 app.get('/api/tokens/latest', async (req, res) => {
   try {
     const limit = parseInt(req.query.limit) || 50;
-    const tokens = db.getLatestTokens(limit);
+    const tokens = await db.getLatestTokens(limit);
     res.json({ success: true, data: tokens });
   } catch (error) {
     console.error('Error fetching latest tokens:', error);
@@ -270,12 +268,12 @@ app.get('/api/tokens/latest', async (req, res) => {
 app.get('/api/stats', async (req, res) => {
   try {
     const stats = {
-      totalCalls: db.getTotalCalls(),
-      activeCalls: db.getActiveCallsCount(),
-      totalUsers: db.getTotalUsers(),
-      totalTokens: db.getTotalTokens(),
-      totalVolume: db.getTotalVolume(),
-      averagePnL: db.getAveragePnL()
+      totalCalls: await db.getTotalCalls(),
+      activeCalls: await db.getActiveCallsCount(),
+      totalUsers: await db.getTotalUsers(),
+      totalTokens: await db.getTotalTokens(),
+      totalVolume: await db.getTotalVolume(),
+      averagePnL: await db.getAveragePnL()
     };
     res.json({ success: true, data: stats });
   } catch (error) {
@@ -338,12 +336,10 @@ app.post('/api/recalculate-scores', async (req, res) => {
           const score = calculateScore(pnlPercent, call.entryMarketCap, call.callRank || 1);
           
           // Update PnL and score
-          const updateStmt = db.db.prepare(`
-            UPDATE calls 
-            SET pnlPercent = ?, score = ?, updatedAt = datetime('now')
-            WHERE id = ?
-          `);
-          updateStmt.run(pnlPercent, score, call.id);
+          await db.updateCall(call.id, {
+            pnlPercent: pnlPercent,
+            score: score
+          });
           
           updatedCount++;
           console.log(`Updated call ${call.id}: PnL ${pnlPercent.toFixed(2)}%, Score ${score.toFixed(1)}`);
@@ -371,7 +367,7 @@ app.post('/api/refresh/:contractAddress', async (req, res) => {
     console.log(`Refreshing token data for: ${contractAddress}`);
     
     // Get current call data
-    const call = db.findCallByContractAddress(contractAddress);
+    const call = await db.findCallByContractAddress(contractAddress);
     if (!call) {
       return res.status(404).json({ success: false, error: 'Call not found' });
     }
@@ -389,7 +385,7 @@ app.post('/api/refresh/:contractAddress', async (req, res) => {
     });
     
     // Update call with current data
-    db.updateCall(call.id, {
+    await db.updateCall(call.id, {
       currentPrice: tokenData.price,
       currentMarketCap: tokenData.marketCap,
       currentLiquidity: tokenData.liquidity,
@@ -430,12 +426,10 @@ app.post('/api/refresh/:contractAddress', async (req, res) => {
     const score = calculateScore(pnlPercent, call.entryMarketCap, call.callRank || 1);
     
     // Update PnL and score in database
-    const updateStmt = db.db.prepare(`
-      UPDATE calls 
-      SET pnlPercent = ?, score = ?, updatedAt = datetime('now')
-      WHERE id = ?
-    `);
-    updateStmt.run(pnlPercent, score, call.id);
+    await db.updateCall(call.id, {
+      pnlPercent: pnlPercent,
+      score: score
+    });
     
     console.log(`Score calculated: ${score.toFixed(1)} points`);
     
@@ -527,12 +521,10 @@ async function autoRecalculateScores() {
           const score = calculateScore(pnlPercent, call.entryMarketCap, call.callRank || 1);
           
           // Update PnL and score
-          const updateStmt = db.db.prepare(`
-            UPDATE calls 
-            SET pnlPercent = ?, score = ?, updatedAt = datetime('now')
-            WHERE id = ?
-          `);
-          updateStmt.run(pnlPercent, score, call.id);
+          await db.updateCall(call.id, {
+            pnlPercent: pnlPercent,
+            score: score
+          });
           
           updatedCount++;
           console.log(`✅ Updated call ${call.id}: PnL ${pnlPercent.toFixed(2)}%, Score ${score.toFixed(1)}`);
