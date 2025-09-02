@@ -11,6 +11,14 @@ yarn-error.log*
 .env.test.local
 .env.production.local
 
+# Vercel
+.vercel
+
+# Firebase
+.firebase/
+firebase-debug.log
+firebase-debug.*.log
+
 # Logs
 logs
 *.log
@@ -28,6 +36,7 @@ coverage/
 .nyc_output
 
 # Dependency directories
+node_modules/
 jspm_packages/
 
 # Optional npm cache directory
@@ -50,6 +59,7 @@ jspm_packages/
 .idea/
 *.swp
 *.swo
+*~
 
 # OS generated files
 .DS_Store
@@ -60,10 +70,10 @@ jspm_packages/
 ehthumbs.db
 Thumbs.db
 
-# Firebase
-.firebase/
-firebase-debug.log
-firebase-debug.*.log
+# Build outputs
+dist/
+build/
 
-# Vercel
-.vercel
+# Temporary files
+tmp/
+temp/
