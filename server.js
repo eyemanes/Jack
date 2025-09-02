@@ -350,7 +350,7 @@ async function recalculateUserTotalScore(userId) {
   }
 }
 
-// Get leaderboard
+// Get leaderboard - ONLY show users who actually made calls
 app.get('/api/leaderboard', async (req, res) => {
   try {
     const leaderboard = await db.getLeaderboard();
@@ -382,15 +382,26 @@ app.get('/api/leaderboard', async (req, res) => {
       }
     }));
     
-    // Sort by total score again after recalculation
-    leaderboardWithStats.sort((a, b) => (b.totalScore || 0) - (a.totalScore || 0));
+    // 🚫 FILTER OUT SCRUBS - Only show users who made calls
+    const activeUsersOnly = leaderboardWithStats.filter(user => {
+      const hasCalls = (user.totalCalls || 0) > 0;
+      if (!hasCalls) {
+        console.log(`🚫 Filtering out user ${user.username || user.firstName || 'Unknown'}: 0 calls made`);
+      }
+      return hasCalls;
+    });
     
-    // Update ranks after sorting
-    leaderboardWithStats.forEach((user, index) => {
+    // Sort by total score again after filtering
+    activeUsersOnly.sort((a, b) => (b.totalScore || 0) - (a.totalScore || 0));
+    
+    // Update ranks after filtering and sorting
+    activeUsersOnly.forEach((user, index) => {
       user.rank = index + 1;
     });
     
-    res.json({ success: true, data: leaderboardWithStats });
+    console.log(`🏆 Leaderboard: ${activeUsersOnly.length} active users (filtered from ${leaderboard.length} total)`);
+    
+    res.json({ success: true, data: activeUsersOnly });
   } catch (error) {
     console.error('Error fetching leaderboard:', error);
     res.status(500).json({ success: false, error: error.message });
@@ -587,9 +598,19 @@ app.get('/api/user-calls/:twitterId', async (req, res) => {
     
     // Find Telegram username for this Twitter ID
     let telegramUsername = null;
+    console.log(`🔍 Searching for Twitter ID: ${twitterId} in linking codes...`);
+    
     for (const [code, data] of Object.entries(linkingCodes)) {
-      if (data.twitterId === twitterId && data.isUsed === true && data.telegramUsername) {
+      console.log(`📋 Checking code ${code}:`, {
+        twitterId: data.twitterId,
+        isUsed: data.isUsed,
+        telegramUsername: data.telegramUsername,
+        matches: data.twitterId === twitterId && data.isUsed === true
+      });
+      
+      if (data.twitterId === twitterId && data.isUsed === true) {
         telegramUsername = data.telegramUsername;
+        console.log(`✅ Found linked Telegram username: ${telegramUsername}`);
         break;
       }
     }
@@ -643,6 +664,105 @@ app.get('/api/user-calls/:twitterId', async (req, res) => {
     res.json({ success: true, data: transformedCalls });
   } catch (error) {
     console.error('Error fetching user calls:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get user profile data by Twitter ID
+app.get('/api/user-profile/:twitterId', async (req, res) => {
+  try {
+    const { twitterId } = req.params;
+    console.log(`📊 Getting profile data for Twitter ID: ${twitterId}`);
+    
+    // Get linking codes to find connection
+    const linkingCodesRef = ref(database, 'linkingCodes');
+    const linkingSnapshot = await get(linkingCodesRef);
+    const linkingCodes = linkingSnapshot.exists() ? linkingSnapshot.val() : {};
+    
+    // Find the linking data for this Twitter ID
+    let linkingData = null;
+    for (const [code, data] of Object.entries(linkingCodes)) {
+      if (data.twitterId === twitterId && data.isUsed === true) {
+        linkingData = data;
+        break;
+      }
+    }
+    
+    if (!linkingData || !linkingData.telegramUsername) {
+      return res.json({
+        success: true,
+        data: {
+          twitterId,
+          isLinked: false,
+          totalCalls: 0,
+          winRate: 0,
+          totalScore: 0,
+          successfulCalls: 0,
+          bestCall: 0,
+          profileData: null
+        }
+      });
+    }
+    
+    // Get all calls for this Telegram username
+    const calls = await db.getAllActiveCalls();
+    const userCalls = calls.filter(call => call.username === linkingData.telegramUsername);
+    
+    // Calculate stats
+    const totalCalls = userCalls.length;
+    const successfulCalls = userCalls.filter(call => 
+      (call.pnlPercent && call.pnlPercent > 0) || (call.score && call.score > 0)
+    ).length;
+    const winRate = totalCalls > 0 ? (successfulCalls / totalCalls) * 100 : 0;
+    const totalScore = userCalls.reduce((sum, call) => sum + (parseFloat(call.score) || 0), 0);
+    const bestCall = Math.max(...userCalls.map(call => call.pnlPercent || 0), 0);
+    
+    // Get recent calls for display
+    const recentCalls = userCalls
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .slice(0, 10)
+      .map(call => ({
+        id: call.id,
+        contractAddress: call.contractAddress,
+        tokenName: call.tokenName,
+        tokenSymbol: call.tokenSymbol,
+        pnlPercent: call.pnlPercent || 0,
+        score: call.score || 0,
+        createdAt: call.createdAt,
+        entryMarketCap: call.entryMarketCap,
+        currentMarketCap: call.currentMarketCap
+      }));
+    
+    console.log(`✅ Profile data calculated for @${linkingData.twitterUsername}:`, {
+      totalCalls,
+      winRate: winRate.toFixed(1),
+      totalScore: totalScore.toFixed(1),
+      successfulCalls,
+      bestCall: bestCall.toFixed(1)
+    });
+    
+    res.json({
+      success: true,
+      data: {
+        twitterId,
+        isLinked: true,
+        totalCalls,
+        winRate: Math.round(winRate * 10) / 10,
+        totalScore: Math.round(totalScore * 10) / 10,
+        successfulCalls,
+        bestCall: Math.round(bestCall * 10) / 10,
+        profileData: {
+          twitterUsername: linkingData.twitterUsername,
+          twitterName: linkingData.twitterName,
+          telegramUsername: linkingData.telegramUsername,
+          linkedAt: linkingData.usedAt || linkingData.createdAt
+        },
+        recentCalls
+      }
+    });
+    
+  } catch (error) {
+    console.error('Error getting user profile:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -712,6 +832,175 @@ app.post('/api/recalculate-user-scores', async (req, res) => {
     });
   } catch (error) {
     console.error('Error recalculating user scores:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Upload banner image endpoint
+app.post('/api/upload-banner', async (req, res) => {
+  try {
+    // This would need multer middleware for file uploads
+    // For now, return error to indicate it needs implementation
+    res.status(501).json({ 
+      success: false, 
+      error: 'File upload not implemented yet - use banner URL instead'
+    });
+  } catch (error) {
+    console.error('Error uploading banner:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Save banner URL endpoint
+app.post('/api/save-banner-url', async (req, res) => {
+  try {
+    const { twitterId, bannerUrl } = req.body;
+    
+    if (!twitterId || !bannerUrl) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing twitterId or bannerUrl' 
+      });
+    }
+
+    // Store banner URL in Firebase
+    const bannerRef = ref(database, `userBanners/${twitterId}`);
+    await set(bannerRef, {
+      bannerUrl,
+      updatedAt: new Date().toISOString()
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error saving banner URL:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get user banner endpoint
+app.get('/api/user-banner/:twitterId', async (req, res) => {
+  try {
+    const { twitterId } = req.params;
+    
+    const bannerRef = ref(database, `userBanners/${twitterId}`);
+    const snapshot = await get(bannerRef);
+    
+    if (snapshot.exists()) {
+      res.json({ 
+        success: true, 
+        bannerUrl: snapshot.val().bannerUrl 
+      });
+    } else {
+      res.json({ 
+        success: true, 
+        bannerUrl: null 
+      });
+    }
+  } catch (error) {
+    console.error('Error getting user banner:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Get user profile with proper stats aggregation
+app.get('/api/user-profile/:twitterId', async (req, res) => {
+  try {
+    const { twitterId } = req.params;
+    console.log(`🔍 Fetching profile for Twitter ID: ${twitterId}`);
+    
+    // Get linking codes to find Telegram username
+    const linkingCodesRef = ref(database, 'linkingCodes');
+    const linkingSnapshot = await get(linkingCodesRef);
+    const linkingCodes = linkingSnapshot.exists() ? linkingSnapshot.val() : {};
+    
+    // Find Telegram username for this Twitter ID
+    let telegramUsername = null;
+    let linkedData = null;
+    for (const [code, data] of Object.entries(linkingCodes)) {
+      if (data.twitterId === twitterId && data.isUsed === true) {
+        telegramUsername = data.telegramUsername;
+        linkedData = data;
+        break;
+      }
+    }
+    
+    if (!telegramUsername) {
+      console.log(`❌ No linked Telegram account found for Twitter ID: ${twitterId}`);
+      return res.json({ 
+        success: true, 
+        data: {
+          totalCalls: 0,
+          successfulCalls: 0,
+          totalScore: 0,
+          winRate: 0,
+          bestCall: 0,
+          recentCalls: [],
+          isLinked: false
+        }
+      });
+    }
+    
+    console.log(`✅ Found linked Telegram: ${telegramUsername}`);
+    
+    // Get all calls and filter by Telegram username
+    const calls = await db.getAllActiveCalls();
+    const userCalls = calls.filter(call => call.username === telegramUsername);
+    
+    console.log(`📊 Found ${userCalls.length} calls for user`);
+    
+    // Calculate stats
+    const totalCalls = userCalls.length;
+    const successfulCalls = userCalls.filter(call => 
+      (call.pnlPercent && call.pnlPercent > 0) || (call.score && call.score > 0)
+    ).length;
+    const totalScore = userCalls.reduce((sum, call) => sum + (parseFloat(call.score) || 0), 0);
+    const winRate = totalCalls > 0 ? (successfulCalls / totalCalls) * 100 : 0;
+    const bestCall = userCalls.reduce((max, call) => 
+      Math.max(max, call.pnlPercent || 0), 0
+    );
+    
+    // Transform calls for frontend
+    const transformedCalls = userCalls.map(call => ({
+      id: call.id,
+      contractAddress: call.contractAddress,
+      createdAt: call.createdAt,
+      token: {
+        name: call.tokenName,
+        symbol: call.tokenSymbol
+      },
+      prices: {
+        entry: call.entryPrice,
+        current: call.currentPrice,
+        entryMarketCap: call.entryMarketCap,
+        currentMarketCap: call.currentMarketCap
+      },
+      performance: {
+        pnlPercent: call.pnlPercent || 0,
+        score: call.score || 0
+      }
+    }));
+    
+    const profileData = {
+      totalCalls,
+      successfulCalls,
+      totalScore,
+      winRate,
+      bestCall,
+      recentCalls: transformedCalls.slice(0, 20),
+      isLinked: true,
+      linkedData
+    };
+    
+    console.log('📊 Profile stats calculated:', {
+      totalCalls,
+      winRate: winRate.toFixed(1),
+      totalScore: totalScore.toFixed(1)
+    });
+    
+    res.json({ success: true, data: profileData });
+    
+  } catch (error) {
+    console.error('Error fetching user profile:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -794,10 +1083,10 @@ app.post('/api/recalculate-scores', async (req, res) => {
   }
 });
 
-// Refresh all token data and update PnL/score using batch API
+// Optimized refresh all endpoint - fast market cap updates, smart PnL calculation
 app.post('/api/refresh-all', async (req, res) => {
   try {
-    console.log('🔄 Refresh all endpoint called - using batch API for speed');
+    console.log('⚡ OPTIMIZED refresh all endpoint called - lightning speed baby!');
     
     const calls = await db.getAllActiveCalls();
     
@@ -805,181 +1094,173 @@ app.post('/api/refresh-all', async (req, res) => {
       return res.json({
         success: true,
         message: 'No calls to refresh',
-        data: {
-          totalCalls: 0,
-          refreshedCount: 0,
-          errorCount: 0,
-          results: [],
-          errors: []
-        }
+        data: { totalCalls: 0, refreshedCount: 0, skippedCount: 0, errorCount: 0 }
       });
     }
     
-    console.log(`📊 Fetching data for ${calls.length} tokens using batch API...`);
+    console.log(`⚡ Processing ${calls.length} tokens with OPTIMIZED approach...`);
     
-    // Extract contract addresses
-    const contractAddresses = calls.map(call => call.contractAddress);
+    // Extract unique contract addresses for batch API
+    const uniqueAddresses = [...new Set(calls.map(call => call.contractAddress))];
+    console.log(`🚀 Batch fetching ${uniqueAddresses.length} unique tokens...`);
     
-    // Use batch API for much faster data fetching
-    console.log(`🔍 Calling batch API for ${contractAddresses.length} tokens:`, contractAddresses);
-    const batchResults = await solanaService.getMultipleTokensData(contractAddresses);
-    
-    console.log(`📈 Batch API returned data for ${batchResults.length} tokens`);
-    console.log(`📊 Batch results:`, batchResults.map(r => ({ 
-      address: r.address, 
-      hasData: !!r.data, 
-      error: r.error 
-    })));
+    // Step 1: FAST batch market cap updates
+    const batchResults = await solanaService.getMultipleTokensData(uniqueAddresses);
+    console.log(`📊 Batch API returned ${batchResults.length} results`);
     
     let refreshedCount = 0;
+    let skippedCount = 0;
     let errorCount = 0;
-    const results = [];
     
-    // Step 1: Update market cap data immediately from batch results
-    console.log(`📊 Step 1: Updating market cap data for all tokens...`);
+    // Step 2: Update market caps instantly (no calculations yet)
+    const marketCapUpdates = [];
     for (const call of calls) {
       try {
-        // Find the corresponding batch result
         const batchResult = batchResults.find(result => result.address === call.contractAddress);
         
         if (!batchResult || !batchResult.data) {
-          console.log(`❌ No batch data found for: ${call.contractAddress}`);
-          results.push({
-            success: false,
-            contractAddress: call.contractAddress,
-            error: batchResult?.error || 'Token data not found in batch'
-          });
           errorCount++;
           continue;
         }
         
         const tokenData = batchResult.data;
-        console.log(`🔄 Updating market data for ${call.contractAddress}: ${tokenData.name} (${tokenData.symbol})`);
         
-        // Update call with current market data only (no PnL/score calculation yet)
-        await db.updateCall(call.id, {
-          currentPrice: tokenData.price,
-          currentMarketCap: tokenData.marketCap,
-          currentLiquidity: tokenData.liquidity,
-          current24hVolume: tokenData.volume24h
-        });
-        
-        console.log(`✅ Updated market data for ${call.contractAddress}: Price $${tokenData.price}, MCap $${tokenData.marketCap}`);
+        // Quick market cap update - no PnL calculation yet
+        marketCapUpdates.push(
+          db.updateCall(call.id, {
+            currentPrice: tokenData.price,
+            currentMarketCap: tokenData.marketCap,
+            currentLiquidity: tokenData.liquidity,
+            current24hVolume: tokenData.volume24h
+          })
+        );
         
       } catch (error) {
         console.error(`❌ Error updating market data for ${call.contractAddress}:`, error.message);
-        results.push({
-          success: false,
-          contractAddress: call.contractAddress,
-          error: error.message
-        });
         errorCount++;
       }
     }
     
-    // Step 2: Calculate PnL and score individually with proper ATH logic
-    console.log(`🧮 Step 2: Calculating PnL and scores individually with ATH logic...`);
+    // Execute all market cap updates in parallel
+    console.log(`⚡ Executing ${marketCapUpdates.length} market cap updates in parallel...`);
+    await Promise.all(marketCapUpdates);
+    console.log('✅ All market caps updated instantly!');
+    
+    // Step 3: SMART PnL calculation - only update if needed
+    console.log('🧠 Starting SMART PnL calculation (skip if no significant change)...');
+    
+    const pnlUpdates = [];
+    const userScoreUpdates = new Set(); // Track which users need score recalculation
+    
     for (const call of calls) {
       try {
-        // Skip if this call already failed in step 1
-        const existingResult = results.find(r => r.contractAddress === call.contractAddress && !r.success);
-        if (existingResult) {
+        const batchResult = batchResults.find(result => result.address === call.contractAddress);
+        
+        if (!batchResult || !batchResult.data) {
           continue;
         }
         
-        console.log(`🧮 Calculating PnL/Score for ${call.contractAddress}...`);
+        const tokenData = batchResult.data;
         
-        // Fetch fresh token data individually to get proper ATH data
-        const tokenData = await solanaService.getTokenData(call.contractAddress);
-        if (!tokenData) {
-          console.log(`❌ Could not fetch individual token data for: ${call.contractAddress}`);
-          continue;
-        }
-        
-        // Calculate PnL - use ATH only if it was reached AFTER the call
+        // Calculate new PnL
         let pnlPercent = 0;
-        let bestMarketCap = tokenData.marketCap; // Default to current market cap
+        let bestMarketCap = tokenData.marketCap;
         
         if (call.entryMarketCap && tokenData.marketCap) {
-          // Check if ATH is available and higher than current market cap
+          // Use ATH if available and reached after call
           if (tokenData.ath && tokenData.ath > tokenData.marketCap) {
-            // Check if ATH timestamp is available
             if (tokenData.athTimestamp) {
               const callTime = new Date(call.createdAt).getTime();
               const athTime = new Date(tokenData.athTimestamp).getTime();
               
               if (athTime > callTime) {
-                // ATH reached AFTER call - use ATH for PnL
                 bestMarketCap = tokenData.ath;
-                console.log(`Using ATH for PnL calculation: $${tokenData.ath} (ATH reached after call)`);
-              } else {
-                // ATH reached BEFORE call - use current market cap for PnL
-                console.log(`ATH was reached before call, using current market cap: $${tokenData.marketCap}`);
               }
-            } else {
-              // If no timestamp, use current market cap to be safe
-              console.log(`No ATH timestamp available, using current market cap: $${tokenData.marketCap}`);
             }
           }
           
           pnlPercent = ((bestMarketCap - call.entryMarketCap) / call.entryMarketCap) * 100;
         }
         
-        // Calculate and update score
-        const score = calculateScore(pnlPercent, call.entryMarketCap, call.callRank || 1);
+        // SMART SKIP LOGIC - only update if significant change
+        const currentPnL = call.pnlPercent || 0;
+        const pnlDifference = Math.abs(pnlPercent - currentPnL);
         
-        // Update PnL and score in database
-        await db.updateCall(call.id, {
-          pnlPercent: pnlPercent,
-          score: score
-        });
+        // Skip if:
+        // 1. Change is less than 5% AND token already above 200% (3x)
+        // 2. Token went from high (3x+) to lower but still positive
+        const currentMultiplier = (currentPnL / 100) + 1;
+        const newMultiplier = (pnlPercent / 100) + 1;
         
-        // Update user's total score
-        await recalculateUserTotalScore(call.userId);
-        
-        console.log(`✅ Calculated PnL/Score for ${call.contractAddress}: PnL ${pnlPercent.toFixed(2)}%, Score ${score.toFixed(1)}`);
-        
-        // Update the result to show success
-        const resultIndex = results.findIndex(r => r.contractAddress === call.contractAddress);
-        if (resultIndex !== -1) {
-          results[resultIndex] = {
-            success: true,
-            contractAddress: call.contractAddress,
-            pnlPercent,
-            score,
-            currentPrice: tokenData.price,
-            currentMarketCap: tokenData.marketCap
-          };
+        if (currentMultiplier >= 3 && newMultiplier >= 1.5 && pnlDifference < 10) {
+          console.log(`⚡ SKIPPING ${call.contractAddress}: ${currentMultiplier.toFixed(1)}x → ${newMultiplier.toFixed(1)}x (no significant change)`);
+          skippedCount++;
+          continue;
         }
         
+        // Calculate new score
+        const score = calculateScore(pnlPercent, call.entryMarketCap, call.callRank || 1);
+        
+        // Only update if there's a meaningful change
+        const scoreDifference = Math.abs(score - (call.score || 0));
+        if (scoreDifference < 0.1 && pnlDifference < 5) {
+          skippedCount++;
+          continue;
+        }
+        
+        // Add to batch update
+        pnlUpdates.push(
+          db.updateCall(call.id, {
+            pnlPercent: pnlPercent,
+            score: score
+          })
+        );
+        
+        userScoreUpdates.add(call.userId);
         refreshedCount++;
         
-        // Add small delay to avoid rate limiting
-        await new Promise(resolve => setTimeout(resolve, 500));
+        console.log(`🔄 UPDATING ${call.contractAddress}: ${currentMultiplier.toFixed(1)}x → ${newMultiplier.toFixed(1)}x, Score: ${(call.score || 0).toFixed(1)} → ${score.toFixed(1)}`);
         
       } catch (error) {
-        console.error(`❌ Error calculating PnL/Score for ${call.contractAddress}:`, error.message);
-        // Don't increment errorCount here as market data was already updated
+        console.error(`❌ Error calculating PnL for ${call.contractAddress}:`, error.message);
+        errorCount++;
       }
+    }
+    
+    // Execute PnL updates in parallel
+    if (pnlUpdates.length > 0) {
+      console.log(`⚡ Executing ${pnlUpdates.length} PnL updates in parallel...`);
+      await Promise.all(pnlUpdates);
+    }
+    
+    // Update user scores for affected users only
+    if (userScoreUpdates.size > 0) {
+      console.log(`🔄 Updating scores for ${userScoreUpdates.size} affected users...`);
+      const scoreUpdatePromises = Array.from(userScoreUpdates).map(userId => 
+        recalculateUserTotalScore(userId).catch(err => 
+          console.error(`Error updating user ${userId}:`, err.message)
+        )
+      );
+      await Promise.all(scoreUpdatePromises);
     }
     
     const responseData = {
       success: true,
-      message: `Refreshed market data for all tokens, calculated PnL/Score for ${refreshedCount} tokens successfully, ${errorCount} failed (using hybrid batch + individual approach)`,
+      message: `⚡ OPTIMIZED refresh completed! Market data: ALL, PnL/Score: ${refreshedCount} updated, ${skippedCount} skipped (smart logic)`,
       data: {
         totalCalls: calls.length,
         refreshedCount,
+        skippedCount,
         errorCount,
-        results: results.filter(r => r.success),
-        errors: results.filter(r => !r.success)
+        affectedUsers: userScoreUpdates.size
       }
     };
     
-    console.log(`🎯 Hybrid refresh completed: Market data updated for all, PnL/Score calculated for ${refreshedCount} tokens, ${errorCount} failed`);
+    console.log(`🎯 OPTIMIZED refresh completed in record time! ${refreshedCount} updated, ${skippedCount} skipped, ${errorCount} errors`);
     res.json(responseData);
     
   } catch (error) {
-    console.error('Error refreshing all tokens:', error);
+    console.error('❌ Error in optimized refresh:', error);
     res.status(500).json({ success: false, error: error.message });
   }
 });
