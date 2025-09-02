@@ -688,14 +688,27 @@ app.get('/api/user-profile/:twitterId', async (req, res) => {
     
     // Find the linking data for this Twitter ID
     let linkingData = null;
+    console.log(`🔍 Searching for Twitter ID: ${twitterId} in linking codes...`);
+    console.log(`📋 Total linking codes found: ${Object.keys(linkingCodes).length}`);
+    
     for (const [code, data] of Object.entries(linkingCodes)) {
+      console.log(`📋 Checking code ${code}:`, {
+        twitterId: data.twitterId,
+        isUsed: data.isUsed,
+        telegramUsername: data.telegramUsername,
+        matches: data.twitterId === twitterId && data.isUsed === true
+      });
+      
       if (data.twitterId === twitterId && data.isUsed === true) {
         linkingData = data;
+        console.log(`✅ Found matching linking data for Twitter ID: ${twitterId}`);
         break;
       }
     }
     
     if (!linkingData || !linkingData.telegramUsername) {
+      console.log(`❌ No linking data found for Twitter ID: ${twitterId}`);
+      console.log(`📋 Linking data found:`, linkingData);
       return res.json({
         success: true,
         data: {
