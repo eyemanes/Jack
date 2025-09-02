@@ -271,6 +271,22 @@ class FirebaseService {
     }
   }
 
+  async updateUser(userId, updateData) {
+    try {
+      const userRef = ref(this.db, `users/${userId}`);
+      const updates = {
+        ...updateData,
+        updatedAt: new Date().toISOString()
+      };
+      
+      await update(userRef, updates);
+      return true;
+    } catch (error) {
+      console.error('Error updating user:', error);
+      throw error;
+    }
+  }
+
   // Chat methods
   async createOrUpdateChat(chatData) {
     try {

@@ -133,15 +133,99 @@ class SolanaTrackerService {
 
 
   /**
-   * Fetch multiple tokens data in batch
+   * Fetch multiple tokens data using the batch API endpoint
    * @param {string[]} contractAddresses - Array of contract addresses
    * @returns {Promise<Object[]>} Array of token data
    */
   async getMultipleTokensData(contractAddresses) {
+    try {
+      console.log(`Fetching batch data for ${contractAddresses.length} tokens using multi endpoint`);
+      
+      // Use the batch API endpoint for better performance
+      const response = await this.axiosInstance.post(`${this.baseUrl}/tokens/multi`, {
+        tokens: contractAddresses
+      });
+      
+      if (!response.data || !response.data.tokens) {
+        console.log('No batch data received from API');
+        return [];
+      }
+      
+      const results = [];
+      const batchData = response.data.tokens;
+      
+      // Process the batch response
+      for (const contractAddress of contractAddresses) {
+        try {
+          const tokenData = batchData[contractAddress];
+          
+          if (tokenData) {
+            // Extract data from the API response structure
+            const token = tokenData.token || {};
+            const pool = tokenData.pools && tokenData.pools[0] ? tokenData.pools[0] : {};
+            const events = tokenData.events || {};
+            
+            // Try to get ATH data if available
+            let athData = null;
+            if (tokenData.ath) {
+              athData = tokenData.ath;
+            }
+            
+            const processedData = {
+              contractAddress,
+              name: token.name || 'Unknown',
+              symbol: token.symbol || 'N/A',
+              price: parseFloat(pool.price?.usd) || 0,
+              marketCap: parseFloat(pool.marketCap?.usd) || 0,
+              volume24h: parseFloat(pool.txns?.volume24h) || 0,
+              liquidity: parseFloat(pool.liquidity?.usd) || 0,
+              priceChange1h: parseFloat(events['1h']?.priceChangePercentage) || 0,
+              priceChange6h: parseFloat(events['6h']?.priceChangePercentage) || 0,
+              priceChange24h: parseFloat(events['24h']?.priceChangePercentage) || 0,
+              supply: parseFloat(pool.tokenSupply) || 0,
+              maxSupply: 0,
+              holders: tokenData.holders || 0,
+              ath: athData ? parseFloat(athData.highest_market_cap) || 0 : 0,
+              athTimestamp: athData ? athData.timestamp : null,
+              image: token.image || token.logo || null,
+              website: token.website || null,
+              twitter: token.twitter || null,
+              telegram: token.telegram || null,
+              timestamp: new Date()
+            };
+            
+            results.push({ address: contractAddress, data: processedData, error: null });
+          } else {
+            results.push({ address: contractAddress, data: null, error: 'Token data not found in batch response' });
+          }
+        } catch (error) {
+          console.error(`Error processing token ${contractAddress} from batch:`, error.message);
+          results.push({ address: contractAddress, data: null, error: error.message });
+        }
+      }
+      
+      console.log(`Batch fetch completed: ${results.filter(r => r.data).length} successful, ${results.filter(r => !r.data).length} failed`);
+      return results;
+      
+    } catch (error) {
+      console.error('Error fetching batch token data:', error.message);
+      
+      // Fallback to individual requests if batch fails
+      console.log('Falling back to individual token requests...');
+      return await this.getMultipleTokensDataFallback(contractAddresses);
+    }
+  }
+
+  /**
+   * Fallback method for fetching multiple tokens data individually
+   * @param {string[]} contractAddresses - Array of contract addresses
+   * @returns {Promise<Object[]>} Array of token data
+   */
+  async getMultipleTokensDataFallback(contractAddresses) {
     const results = [];
     
-    // Process in batches to avoid rate limiting
-    const batchSize = 5;
+    // Process in smaller batches to avoid rate limiting
+    const batchSize = 3;
     for (let i = 0; i < contractAddresses.length; i += batchSize) {
       const batch = contractAddresses.slice(i, i + batchSize);
       
@@ -159,7 +243,7 @@ class SolanaTrackerService {
       
       // Add delay between batches to avoid rate limiting
       if (i + batchSize < contractAddresses.length) {
-        await this.delay(1000);
+        await this.delay(2000); // Longer delay for fallback
       }
     }
     

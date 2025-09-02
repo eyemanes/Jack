@@ -135,6 +135,9 @@ app.get('/api/calls', async (req, res) => {
               score: score
             });
             
+            // Update user's total score
+            await recalculateUserTotalScore(call.userId);
+            
             // Update the call object with new data
             call.currentPrice = tokenData.price;
             call.currentMarketCap = tokenData.marketCap;
@@ -276,6 +279,51 @@ app.get('/api/calls/:contractAddress', async (req, res) => {
   }
 });
 
+// Helper function to recalculate user total score
+async function recalculateUserTotalScore(userId) {
+  try {
+    const userCalls = await db.getCallsByUser(userId);
+    
+    // Calculate total score from all calls
+    const totalScore = userCalls.reduce((sum, call) => {
+      return sum + (parseFloat(call.score) || 0);
+    }, 0);
+    
+    // Calculate successful calls (calls with positive PnL or score > 0)
+    const successfulCalls = userCalls.filter(call => 
+      (call.pnlPercent && call.pnlPercent > 0) || (call.score && call.score > 0)
+    ).length;
+    
+    // Calculate win rate
+    const winRate = userCalls.length > 0 ? (successfulCalls / userCalls.length) * 100 : 0;
+    
+    // Update user record with calculated stats
+    await db.updateUser(userId, {
+      totalScore: totalScore,
+      totalCalls: userCalls.length,
+      successfulCalls: successfulCalls,
+      winRate: winRate
+    });
+    
+    console.log(`Updated user ${userId}: Total Score: ${totalScore}, Calls: ${userCalls.length}, Win Rate: ${winRate.toFixed(1)}%`);
+    
+    return {
+      totalScore,
+      totalCalls: userCalls.length,
+      successfulCalls,
+      winRate
+    };
+  } catch (error) {
+    console.error(`Error recalculating user ${userId} total score:`, error);
+    return {
+      totalScore: 0,
+      totalCalls: 0,
+      successfulCalls: 0,
+      winRate: 0
+    };
+  }
+}
+
 // Get leaderboard
 app.get('/api/leaderboard', async (req, res) => {
   try {
@@ -284,24 +332,16 @@ app.get('/api/leaderboard', async (req, res) => {
     // Calculate additional statistics for each user
     const leaderboardWithStats = await Promise.all(leaderboard.map(async (user, index) => {
       try {
-        // Get user's calls to calculate win rate and successful calls
-        const userCalls = await db.getCallsByUser(parseInt(user.id));
-        
-        // Calculate successful calls (calls with positive PnL or score > 0)
-        const successfulCalls = userCalls.filter(call => 
-          (call.pnlPercent && call.pnlPercent > 0) || (call.score && call.score > 0)
-        ).length;
-        
-        // Calculate win rate
-        const winRate = userCalls.length > 0 ? (successfulCalls / userCalls.length) * 100 : 0;
+        // Recalculate user stats to ensure accuracy
+        const userStats = await recalculateUserTotalScore(user.id);
         
         return {
           ...user,
           rank: index + 1,
-          successfulCalls: successfulCalls,
-          winRate: winRate,
-          totalCalls: userCalls.length || user.totalCalls || 0,
-          totalScore: user.totalScore || 0
+          successfulCalls: userStats.successfulCalls,
+          winRate: userStats.winRate,
+          totalCalls: userStats.totalCalls,
+          totalScore: userStats.totalScore
         };
       } catch (error) {
         console.error(`Error calculating stats for user ${user.id}:`, error);
@@ -315,6 +355,14 @@ app.get('/api/leaderboard', async (req, res) => {
         };
       }
     }));
+    
+    // Sort by total score again after recalculation
+    leaderboardWithStats.sort((a, b) => (b.totalScore || 0) - (a.totalScore || 0));
+    
+    // Update ranks after sorting
+    leaderboardWithStats.forEach((user, index) => {
+      user.rank = index + 1;
+    });
     
     res.json({ success: true, data: leaderboardWithStats });
   } catch (error) {
@@ -460,6 +508,35 @@ app.post('/api/generate-linking-code', async (req, res) => {
   }
 });
 
+// Recalculate all user scores endpoint
+app.post('/api/recalculate-user-scores', async (req, res) => {
+  try {
+    console.log('Recalculating all user scores...');
+    
+    const users = await db.getLeaderboard();
+    let updatedCount = 0;
+    
+    for (const user of users) {
+      try {
+        await recalculateUserTotalScore(user.id);
+        updatedCount++;
+        console.log(`Updated user ${user.id} total score`);
+      } catch (error) {
+        console.error(`Error updating user ${user.id}:`, error.message);
+      }
+    }
+    
+    res.json({ 
+      success: true, 
+      message: `Recalculated scores for ${updatedCount} users`,
+      updatedCount 
+    });
+  } catch (error) {
+    console.error('Error recalculating user scores:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Recalculate all scores endpoint
 app.post('/api/recalculate-scores', async (req, res) => {
   try {
@@ -538,26 +615,60 @@ app.post('/api/recalculate-scores', async (req, res) => {
   }
 });
 
-// Refresh all token data and update PnL/score
+// Refresh all token data and update PnL/score using batch API
 app.post('/api/refresh-all', async (req, res) => {
   try {
-    console.log('🔄 Refresh all endpoint called');
+    console.log('🔄 Refresh all endpoint called - using batch API for speed');
     
     const calls = await db.getAllActiveCalls();
+    
+    if (calls.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No calls to refresh',
+        data: {
+          totalCalls: 0,
+          refreshedCount: 0,
+          errorCount: 0,
+          results: [],
+          errors: []
+        }
+      });
+    }
+    
+    console.log(`📊 Fetching data for ${calls.length} tokens using batch API...`);
+    
+    // Extract contract addresses
+    const contractAddresses = calls.map(call => call.contractAddress);
+    
+    // Use batch API for much faster data fetching
+    const batchResults = await solanaService.getMultipleTokensData(contractAddresses);
+    
+    console.log(`📈 Batch API returned data for ${batchResults.length} tokens`);
+    
     let refreshedCount = 0;
     let errorCount = 0;
+    const results = [];
     
-    // Process all calls in parallel for better performance
-    const refreshPromises = calls.map(async (call) => {
+    // Process each call with its corresponding batch data
+    for (const call of calls) {
       try {
-        console.log(`Refreshing token data for: ${call.contractAddress}`);
+        // Find the corresponding batch result
+        const batchResult = batchResults.find(result => result.address === call.contractAddress);
         
-        // Fetch fresh token data from Solana Tracker API
-        const tokenData = await solanaService.getTokenData(call.contractAddress);
-        if (!tokenData) {
-          console.log(`No token data found for: ${call.contractAddress}`);
-          return { success: false, contractAddress: call.contractAddress, error: 'Token data not found' };
+        if (!batchResult || !batchResult.data) {
+          console.log(`❌ No batch data found for: ${call.contractAddress}`);
+          results.push({
+            success: false,
+            contractAddress: call.contractAddress,
+            error: batchResult?.error || 'Token data not found in batch'
+          });
+          errorCount++;
+          continue;
         }
+        
+        const tokenData = batchResult.data;
+        console.log(`🔄 Processing ${call.contractAddress}: ${tokenData.name} (${tokenData.symbol})`);
         
         // Update call with current data
         await db.updateCall(call.id, {
@@ -605,51 +716,48 @@ app.post('/api/refresh-all', async (req, res) => {
           score: score
         });
         
+        // Update user's total score
+        await recalculateUserTotalScore(call.userId);
+        
         console.log(`✅ Refreshed ${call.contractAddress}: PnL ${pnlPercent.toFixed(2)}%, Score ${score.toFixed(1)}`);
-        return { 
-          success: true, 
+        
+        results.push({
+          success: true,
           contractAddress: call.contractAddress,
           pnlPercent,
           score,
           currentPrice: tokenData.price,
           currentMarketCap: tokenData.marketCap
-        };
-      } catch (error) {
-        console.error(`❌ Error refreshing ${call.contractAddress}:`, error.message);
-        return { 
-          success: false, 
-          contractAddress: call.contractAddress, 
-          error: error.message 
-        };
-      }
-    });
-    
-    // Wait for all refresh operations to complete
-    const results = await Promise.all(refreshPromises);
-    
-    // Count successful and failed refreshes
-    results.forEach(result => {
-      if (result.success) {
+        });
+        
         refreshedCount++;
-      } else {
+        
+      } catch (error) {
+        console.error(`❌ Error processing ${call.contractAddress}:`, error.message);
+        results.push({
+          success: false,
+          contractAddress: call.contractAddress,
+          error: error.message
+        });
         errorCount++;
       }
-    });
+    }
     
     const responseData = {
       success: true,
-      message: `Refreshed ${refreshedCount} tokens successfully, ${errorCount} failed`,
+      message: `Refreshed ${refreshedCount} tokens successfully, ${errorCount} failed (using batch API)`,
       data: {
         totalCalls: calls.length,
         refreshedCount,
         errorCount,
-        results: results.filter(r => r.success), // Only return successful results
-        errors: results.filter(r => !r.success) // Only return failed results
+        results: results.filter(r => r.success),
+        errors: results.filter(r => !r.success)
       }
     };
     
-    console.log(`🎯 Refresh all completed: ${refreshedCount} successful, ${errorCount} failed`);
+    console.log(`🎯 Batch refresh completed: ${refreshedCount} successful, ${errorCount} failed`);
     res.json(responseData);
+    
   } catch (error) {
     console.error('Error refreshing all tokens:', error);
     res.status(500).json({ success: false, error: error.message });
@@ -728,6 +836,9 @@ app.post('/api/refresh/:contractAddress', async (req, res) => {
       pnlPercent: pnlPercent,
       score: score
     });
+    
+    // Update user's total score
+    await recalculateUserTotalScore(call.userId);
     
     console.log(`Score calculated: ${score.toFixed(1)} points`);
     
