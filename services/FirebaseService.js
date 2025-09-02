@@ -271,6 +271,51 @@ class FirebaseService {
     }
   }
 
+  // Chat methods
+  async createOrUpdateChat(chatData) {
+    try {
+      const chatsRef = ref(this.db, 'chats');
+      const chatQuery = query(chatsRef, orderByChild('telegramId'), equalTo(chatData.telegramId));
+      const snapshot = await get(chatQuery);
+      
+      if (snapshot.exists()) {
+        // Update existing chat
+        let chatId = null;
+        snapshot.forEach((childSnapshot) => {
+          chatId = childSnapshot.key;
+        });
+        
+        if (chatId) {
+          const chatRef = ref(this.db, `chats/${chatId}`);
+          await update(chatRef, {
+            ...chatData,
+            updatedAt: new Date().toISOString()
+          });
+          return { id: chatId, ...chatData };
+        }
+      } else {
+        // Create new chat
+        const newChatRef = push(chatsRef);
+        const chatId = newChatRef.key;
+        
+        const chatWithId = {
+          ...chatData,
+          id: chatId,
+          callsCount: 0,
+          isActive: true,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
+        
+        await set(newChatRef, chatWithId);
+        return chatWithId;
+      }
+    } catch (error) {
+      console.error('Error creating or updating chat:', error);
+      throw error;
+    }
+  }
+
   // Stats methods
   async getTotalCalls() {
     try {

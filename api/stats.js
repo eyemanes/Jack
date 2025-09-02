@@ -1,4 +1,4 @@
-// Stats endpoint for Vercel - now using Firebase
+// Stats endpoint for Vercel - using Firebase
 const FirebaseService = require('../services/FirebaseService');
 
 const db = new FirebaseService();
@@ -15,6 +15,7 @@ module.exports = async (req, res) => {
       return;
     }
     
+    // Get comprehensive stats
     const stats = {
       totalCalls: await db.getTotalCalls(),
       activeCalls: await db.getActiveCallsCount(),
@@ -24,15 +25,16 @@ module.exports = async (req, res) => {
       averagePnL: await db.getAveragePnL()
     };
     
-    res.status(200).json({ 
-      success: true, 
-      data: stats 
+    res.status(200).json({
+      success: true,
+      data: stats,
+      timestamp: new Date().toISOString()
     });
   } catch (error) {
     console.error('Error fetching stats:', error);
-    res.status(500).json({ 
-      success: false, 
-      error: error.message 
+    res.status(500).json({
+      success: false,
+      error: error.message
     });
   }
 };

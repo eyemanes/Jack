@@ -1,4 +1,4 @@
-// Calls endpoint for Vercel - now using Firebase
+// Calls endpoint for Vercel - using Firebase
 const FirebaseService = require('../services/FirebaseService');
 
 const db = new FirebaseService();

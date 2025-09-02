@@ -1,4 +1,4 @@
-// Health check endpoint for Vercel - now with Firebase stats
+// Health endpoint for Vercel - using Firebase
 const FirebaseService = require('../services/FirebaseService');
 
 const db = new FirebaseService();
@@ -14,7 +14,7 @@ module.exports = async (req, res) => {
       res.status(200).end();
       return;
     }
-
+    
     // Get Firebase stats
     const stats = {
       totalCalls: await db.getTotalCalls(),
@@ -24,21 +24,19 @@ module.exports = async (req, res) => {
       totalVolume: await db.getTotalVolume(),
       averagePnL: await db.getAveragePnL()
     };
-
-    res.status(200).json({ 
-      status: 'OK', 
-      message: 'Solana Tracker API is running with Firebase',
-      timestamp: new Date().toISOString(),
-      method: req.method,
-      url: req.url,
-      database: 'Firebase',
-      stats: stats
+    
+    res.status(200).json({
+      success: true,
+      database: 'firebase',
+      stats: stats,
+      timestamp: new Date().toISOString()
     });
   } catch (error) {
-    console.error('Health check error:', error);
-    res.status(500).json({ 
-      status: 'ERROR', 
-      message: error.message 
+    console.error('Error fetching health stats:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      database: 'firebase'
     });
   }
 };
