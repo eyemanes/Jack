@@ -806,10 +806,10 @@ app.get('/api/user-profile/:twitterId', async (req, res) => {
     
     console.log(`✅ Profile data calculated for @${linkingData.twitterUsername}:`, {
       totalCalls,
-      winRate: winRate.toFixed(1),
-      totalScore: totalScore.toFixed(1),
+      winRate: Math.round(winRate * 10) / 10,
+      totalScore: Math.round(totalScore * 10) / 10,
       successfulCalls,
-      bestCall: bestCall.toFixed(1)
+      bestCall: Math.round(bestCall * 10) / 10
     });
     
     res.json({
@@ -1418,9 +1418,18 @@ app.post('/api/refresh-all', async (req, res) => {
     const uniqueAddresses = [...new Set(calls.map(call => call.contractAddress))];
     console.log(`🔄 Step 1: Batch fetching ${uniqueAddresses.length} unique tokens...`);
     
-    // Get batch token data
+    // Add delay to give time for PnL calculations
+    console.log('⏳ Adding delay for PnL calculation processing...');
+    await new Promise(resolve => setTimeout(resolve, 2000)); // 2 second delay
+    
+    // Get batch token data with rate limiting protection
     const batchResults = await solanaService.getMultipleTokensData(uniqueAddresses);
     console.log(`📊 Batch API returned ${batchResults.length} results`);
+    
+    // Add small delay to prevent rate limiting
+    if (uniqueAddresses.length > 5) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
     
     let refreshedCount = 0;
     let skippedCount = 0;
@@ -1585,6 +1594,10 @@ app.post('/api/refresh/:contractAddress', async (req, res) => {
     if (!call) {
       return res.status(404).json({ success: false, error: 'Call not found' });
     }
+    
+    // Add delay to give time for PnL calculations
+    console.log('⏳ Adding delay for PnL calculation processing...');
+    await new Promise(resolve => setTimeout(resolve, 2000)); // 2 second delay
     
     // Fetch fresh token data from Solana Tracker API
     const tokenData = await solanaService.getTokenData(contractAddress);
