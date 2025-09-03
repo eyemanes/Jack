@@ -17,6 +17,7 @@ app.use(express.json());
 // Initialize Firebase database and service
 const db = new FirebaseService();
 const solanaService = new SolanaTrackerService();
+const pnlService = new (require('./services/PnlCalculationService'))();
 
 // Helper function to calculate score (multiplier-based system)
 function calculateScore(pnlPercent, entryMarketCap, callRank = 1) {
@@ -99,41 +100,20 @@ app.get('/api/calls', async (req, res) => {
             });
             
             // Calculate PnL - use ATH only if it was reached AFTER the call
-            let pnlPercent = 0;
-            let bestMarketCap = tokenData.marketCap; // Default to current market cap
-            
-            if (call.entryMarketCap && tokenData.marketCap) {
-              // Check if ATH is available and higher than current market cap
-              if (tokenData.ath && tokenData.ath > tokenData.marketCap) {
-                // Check if ATH timestamp is available
-                if (tokenData.athTimestamp) {
-                  const callTime = new Date(call.createdAt).getTime();
-                  const athTime = new Date(tokenData.athTimestamp).getTime();
-                  
-                  if (athTime > callTime) {
-                    // ATH reached AFTER call - use ATH for PnL
-                    bestMarketCap = tokenData.ath;
-                    console.log(`Using ATH for PnL calculation: $${tokenData.ath} (ATH reached after call)`);
-                  } else {
-                    // ATH reached BEFORE call - use current market cap for PnL
-                    console.log(`ATH was reached before call, using current market cap: $${tokenData.marketCap}`);
-                  }
-                } else {
-                  // If no timestamp, use current market cap to be safe
-                  console.log(`No ATH timestamp available, using current market cap: $${tokenData.marketCap}`);
-                }
-              }
-              
-              pnlPercent = ((bestMarketCap - call.entryMarketCap) / call.entryMarketCap) * 100;
-            }
-            console.log(`PnL calculated: ${pnlPercent.toFixed(2)}% (using market cap: $${bestMarketCap})`);
+            // 🔥 NEW PnL CALCULATION SYSTEM
+            const pnlPercent = pnlService.calculatePnlForCall(call, tokenData);
+            console.log(`🔥 NEW PnL calculated: ${pnlPercent.toFixed(2)}%`);
             
             // Calculate and update score
             const score = calculateScore(pnlPercent, call.entryMarketCap, call.callRank || 1);
             
-            // Update PnL and score in database
+            // Update PnL and score in database with maxPnl tracking
+            const currentMaxPnl = parseFloat(call.maxPnl) || 0;
+            const newMaxPnl = Math.max(currentMaxPnl, pnlPercent);
+            
             await db.updateCall(call.id, {
               pnlPercent: pnlPercent,
+              maxPnl: newMaxPnl,
               score: score
             });
             
@@ -1491,35 +1471,8 @@ app.post('/api/refresh-all', async (req, res) => {
     
     for (const { call, tokenData } of validCalls) {
       try {
-        // 🔥 FIXED ATH RULE: Lock in highest multiplier if token hits 2x+
-        // Calculate PnL with YOUR RULE: Never go backwards once 2x+ is hit
-        let pnlPercent = 0;
-        let bestMarketCap = tokenData.marketCap;
-        
-        if (call.entryMarketCap && tokenData.marketCap) {
-          // Check if token ever reached 2x (200% gain) - YOUR RULE!
-          const currentMultiplier = tokenData.marketCap / call.entryMarketCap;
-          const athMultiplier = (tokenData.ath || 0) / call.entryMarketCap;
-          
-          // 🚀 YOUR RULE: If token hit 2x+, ALWAYS use the highest multiplier (ATH)
-          if (athMultiplier >= 2.0) {
-            // Check if ATH was reached AFTER our call
-            if (tokenData.athTimestamp) {
-              const callTime = new Date(call.createdAt).getTime();
-              const athTime = new Date(tokenData.athTimestamp).getTime();
-              
-              if (athTime > callTime) {
-                // ATH reached AFTER call - LOCK IT IN! 🔒
-                bestMarketCap = tokenData.ath;
-              }
-            }
-          } else {
-            // Token never reached 2x - track current price (can go negative)
-            bestMarketCap = tokenData.marketCap;
-          }
-          
-          pnlPercent = ((bestMarketCap - call.entryMarketCap) / call.entryMarketCap) * 100;
-        }
+        // 🔥 NEW PnL CALCULATION SYSTEM
+        const pnlPercent = pnlService.calculatePnlForCall(call, tokenData);
         
         // SMART SKIP LOGIC - same as before but more efficient
         const currentPnL = call.pnlPercent || 0;
@@ -1560,10 +1513,14 @@ app.post('/api/refresh-all', async (req, res) => {
         // Calculate score exactly like single refresh
         const score = calculateScore(pnlPercent, call.entryMarketCap, call.callRank || 1);
         
-        // STEP 3: Update PnL and score
+        // STEP 3: Update PnL, maxPnl, and score
+        const currentMaxPnl = parseFloat(call.maxPnl) || 0;
+        const newMaxPnl = Math.max(currentMaxPnl, pnlPercent);
+        
         scoreUpdates.push(
           db.updateCall(call.id, {
             pnlPercent: pnlPercent,
+            maxPnl: newMaxPnl,
             score: score
           })
         );
