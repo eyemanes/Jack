@@ -102,11 +102,8 @@ class PnlCalculationService {
       }
     }
 
-    // Rule 3: 10x Cap Rule
-    if (peakPnl >= 9.0) {
-      pnl = 9.0; // Cap at 10x (900%)
-      console.log(`🎯 10x Rule: Capping at 10x (${(pnl * 100).toFixed(2)}%)`);
-    }
+    // Rule 3: No cap - let tokens go as high as they can!
+    // Removed 10x cap to allow for real 100x-200x gains
 
     const finalPnlPercent = pnl * 100;
     

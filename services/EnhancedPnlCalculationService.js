@@ -150,12 +150,8 @@ class EnhancedPnlCalculationService {
         reason = 'PnL capped to maximum possible value';
       }
 
-      // Rule 4: Cap at 10x (900%)
-      if (finalPnl > 900) {
-        finalPnl = 900;
-        pnlType = 'capped_10x';
-        reason = 'PnL capped at 10x (900%)';
-      }
+      // Rule 4: No cap - let tokens go as high as they can!
+      // Removed 10x cap to allow for real 100x-200x gains
 
       const result = {
         pnlPercent: finalPnl,
