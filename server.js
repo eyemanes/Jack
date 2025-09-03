@@ -1706,7 +1706,7 @@ async function autoRecalculateScores() {
   try {
     console.log('🔄 Auto-recalculating scores on startup...');
     
-    const calls = db.getAllActiveCalls();
+    const calls = await db.getAllActiveCalls();
     let updatedCount = 0;
     
     for (const call of calls) {
