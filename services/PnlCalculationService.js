@@ -88,21 +88,28 @@ class PnlCalculationService {
    * @returns {number} Calculated PnL percentage
    */
   calculatePnlForCall(call, tokenData) {
-    const callTime = new Date(call.createdAt || call.callTime).getTime();
-    const mcapAtCall = parseFloat(call.entryMarketCap) || 0;
-    const currentMcap = parseFloat(tokenData.marketCap) || 0;
-    const athMcap = parseFloat(tokenData.ath) || 0;
-    const athTime = tokenData.athTimestamp ? new Date(tokenData.athTimestamp).getTime() : null;
-    const maxPnl = parseFloat(call.maxPnl) || 0;
+    try {
+      const callTime = new Date(call.createdAt || call.callTime).getTime();
+      const mcapAtCall = parseFloat(call.entryMarketCap) || 0;
+      const currentMcap = parseFloat(tokenData.marketCap) || 0;
+      const athMcap = parseFloat(tokenData.ath) || 0;
+      const athTime = tokenData.athTimestamp ? new Date(tokenData.athTimestamp).getTime() : null;
+      const maxPnl = parseFloat(call.maxPnl) || 0;
 
-    return this.calculatePnl({
-      callTime,
-      mcapAtCall,
-      currentMcap,
-      athMcap,
-      athTime,
-      maxPnl
-    });
+      return this.calculatePnl({
+        callTime,
+        mcapAtCall,
+        currentMcap,
+        athMcap,
+        athTime,
+        maxPnl
+      });
+    } catch (error) {
+      console.error('❌ Error in calculatePnlForCall:', error);
+      console.error('Call data:', call);
+      console.error('Token data:', tokenData);
+      return 0; // Return 0 PnL on error
+    }
   }
 
   /**

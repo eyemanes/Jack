@@ -1493,7 +1493,7 @@ app.post('/api/refresh-all', async (req, res) => {
         }
         
         // Store for Step 3
-        pnlUpdates.push({ call, tokenData, pnlPercent, bestMarketCap });
+        pnlUpdates.push({ call, tokenData, pnlPercent });
         
       } catch (error) {
         console.error(`❌ Error in Step 2 for ${call.contractAddress}:`, error.message);
@@ -1508,7 +1508,7 @@ app.post('/api/refresh-all', async (req, res) => {
     const scoreUpdates = [];
     const userScoreUpdates = new Set();
     
-    for (const { call, tokenData, pnlPercent, bestMarketCap } of pnlUpdates) {
+    for (const { call, tokenData, pnlPercent } of pnlUpdates) {
       try {
         // Calculate score exactly like single refresh
         const score = calculateScore(pnlPercent, call.entryMarketCap, call.callRank || 1);
