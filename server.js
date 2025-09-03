@@ -387,11 +387,39 @@ app.get('/api/leaderboard', async (req, res) => {
   try {
     const leaderboard = await db.getLeaderboard();
     
+    // 🏆 LEADERBOARD: Add Twitter mapping like in /api/calls
+    const linkingCodesRef = ref(database, 'linkingCodes');
+    const linkingSnapshot = await get(linkingCodesRef);
+    const linkingCodes = linkingSnapshot.exists() ? linkingSnapshot.val() : {};
+    
+    const telegramToTwitterMap = {};
+    for (const [code, data] of Object.entries(linkingCodes)) {
+      if (data.isUsed === true) {
+        const telegramUsername = data.telegramUsername || data.telegramUserId;
+        if (telegramUsername && data.twitterUsername) {
+          telegramToTwitterMap[telegramUsername] = {
+            twitterUsername: data.twitterUsername,
+            twitterName: data.twitterName,
+            twitterId: data.twitterId
+          };
+        }
+      }
+    }
+    
     // Calculate additional statistics for each user
     const leaderboardWithStats = await Promise.all(leaderboard.map(async (user, index) => {
       try {
         // Recalculate user stats to ensure accuracy
         const userStats = await recalculateUserTotalScore(user.id);
+        
+        // 🏆 Add Twitter info to leaderboard users
+        const twitterInfo = telegramToTwitterMap[user.username];
+        let displayName = user.username || user.firstName || 'Anonymous';
+        if (twitterInfo) {
+          displayName = `@${twitterInfo.twitterUsername}`;
+        } else if (user.username) {
+          displayName = `@${user.username}`;
+        }
         
         return {
           ...user,
@@ -399,7 +427,12 @@ app.get('/api/leaderboard', async (req, res) => {
           successfulCalls: userStats.successfulCalls,
           winRate: userStats.winRate,
           totalCalls: userStats.totalCalls,
-          totalScore: userStats.totalScore
+          totalScore: userStats.totalScore,
+          displayName: displayName,
+          twitterUsername: twitterInfo?.twitterUsername || null,
+          twitterName: twitterInfo?.twitterName || null,
+          twitterProfilePic: twitterInfo?.twitterUsername ? `https://unavatar.io/twitter/${twitterInfo.twitterUsername}` : null,
+          isLinked: !!twitterInfo
         };
       } catch (error) {
         console.error(`Error calculating stats for user ${user.id}:`, error);
@@ -409,7 +442,12 @@ app.get('/api/leaderboard', async (req, res) => {
           successfulCalls: 0,
           winRate: 0,
           totalCalls: user.totalCalls || 0,
-          totalScore: user.totalScore || 0
+          totalScore: user.totalScore || 0,
+          displayName: user.username ? `@${user.username}` : user.firstName || 'Anonymous',
+          twitterUsername: null,
+          twitterName: null,
+          twitterProfilePic: null,
+          isLinked: false
         };
       }
     }));
@@ -432,6 +470,12 @@ app.get('/api/leaderboard', async (req, res) => {
     });
     
     console.log(`🏆 Leaderboard: ${activeUsersOnly.length} active users (filtered from ${leaderboard.length} total)`);
+    console.log(`🏆 Sample leaderboard users:`, activeUsersOnly.slice(0, 3).map(u => ({
+      displayName: u.displayName,
+      twitterUsername: u.twitterUsername,
+      isLinked: u.isLinked,
+      totalScore: u.totalScore
+    })));
     
     res.json({ success: true, data: activeUsersOnly });
   } catch (error) {
