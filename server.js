@@ -201,7 +201,8 @@ app.get('/api/calls', async (req, res) => {
         token: {
           name: call.tokenName,
           symbol: call.tokenSymbol,
-          contractAddress: call.contractAddress
+          contractAddress: call.contractAddress,
+          image: call.image || null
         },
         user: {
           id: call.userId,
@@ -697,7 +698,8 @@ app.get('/api/user-calls/:twitterId', async (req, res) => {
       token: {
         name: call.tokenName,
         symbol: call.tokenSymbol,
-        contractAddress: call.contractAddress
+        contractAddress: call.contractAddress,
+        image: call.image || null
       },
       user: {
         id: call.userId,
@@ -803,6 +805,7 @@ app.get('/api/user-profile/:twitterId', async (req, res) => {
         contractAddress: call.contractAddress,
         tokenName: call.tokenName,
         tokenSymbol: call.tokenSymbol,
+        image: call.image || null,
         pnlPercent: call.pnlPercent || 0,
         score: call.score || 0,
         createdAt: call.createdAt,
