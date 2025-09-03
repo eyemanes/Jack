@@ -197,6 +197,16 @@ app.get('/api/calls', async (req, res) => {
       // Check if this user has a linked Twitter account
       const twitterInfo = telegramToTwitterMap[call.username];
       
+      // 🔧 IMPROVED: Better display name logic with fallback
+      let displayName = call.username || call.firstName || 'Anonymous';
+      if (twitterInfo) {
+        displayName = `@${twitterInfo.twitterUsername}`;
+      } else if (call.username) {
+        displayName = `@${call.username}`;
+      } else if (call.firstName) {
+        displayName = call.firstName;
+      }
+      
       return {
         id: call.id,
         contractAddress: call.contractAddress,
@@ -212,12 +222,11 @@ app.get('/api/calls', async (req, res) => {
           username: call.username,
           firstName: call.firstName,
           lastName: call.lastName,
-          displayName: twitterInfo ? `@${twitterInfo.twitterUsername}` : (call.username || call.firstName || 'Anonymous'),
-        twitterUsername: twitterInfo?.twitterUsername || null,
-        twitterName: twitterInfo?.twitterName || null,
-        twitterProfilePic: twitterInfo?.twitterUsername ? `https://unavatar.io/twitter/${twitterInfo.twitterUsername}` : null,
-        // Also try to get actual profile pic URL if stored in linking data
-        actualProfilePic: twitterInfo?.profilePictureUrl || null,
+          displayName: displayName, // Use improved display name
+          twitterUsername: twitterInfo?.twitterUsername || null,
+          twitterName: twitterInfo?.twitterName || null,
+          twitterProfilePic: twitterInfo?.twitterUsername ? `https://unavatar.io/twitter/${twitterInfo.twitterUsername}` : null,
+          actualProfilePic: twitterInfo?.profilePictureUrl || null,
           isLinked: !!twitterInfo,
           twitterInfo: twitterInfo || null
         },
@@ -986,6 +995,106 @@ app.get('/api/debug-linking/:twitterId', async (req, res) => {
   }
 });
 
+// 🚑 HOTFIX: Repair broken linking data
+app.post('/api/fix-linking/:twitterId', async (req, res) => {
+  try {
+    const { twitterId } = req.params;
+    const { telegramUsername } = req.body;
+    
+    if (!telegramUsername) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'telegramUsername is required in request body' 
+      });
+    }
+    
+    console.log(`🚑 HOTFIX: Repairing linking for Twitter ID: ${twitterId} -> @${telegramUsername}`);
+    
+    // Get all linking codes
+    const linkingCodesRef = ref(database, 'linkingCodes');
+    const linkingSnapshot = await get(linkingCodesRef);
+    const linkingCodes = linkingSnapshot.exists() ? linkingSnapshot.val() : {};
+    
+    // Find the matching code
+    let fixedCode = null;
+    for (const [code, data] of Object.entries(linkingCodes)) {
+      if (data.twitterId === twitterId && data.isUsed === true) {
+        // Update the code with the correct telegram username
+        const codeRef = ref(database, `linkingCodes/${code}`);
+        await update(codeRef, {
+          telegramUsername: telegramUsername,
+          fixedAt: new Date().toISOString()
+        });
+        
+        fixedCode = code;
+        console.log(`✅ HOTFIX: Fixed code ${code} with telegramUsername: ${telegramUsername}`);
+        break;
+      }
+    }
+    
+    if (fixedCode) {
+      res.json({ 
+        success: true, 
+        message: `Fixed linking code ${fixedCode}`,
+        data: {
+          twitterId,
+          telegramUsername,
+          fixedCode
+        }
+      });
+    } else {
+      res.json({ 
+        success: false, 
+        error: 'No matching linking code found to fix' 
+      });
+    }
+    
+  } catch (error) {
+    console.error('Error in fix linking endpoint:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 🧨 CLEANUP: Delete broken linking data to start fresh
+app.delete('/api/cleanup-linking/:twitterId', async (req, res) => {
+  try {
+    const { twitterId } = req.params;
+    console.log(`🧨 CLEANUP: Deleting all linking data for Twitter ID: ${twitterId}`);
+    
+    // Get all linking codes
+    const linkingCodesRef = ref(database, 'linkingCodes');
+    const linkingSnapshot = await get(linkingCodesRef);
+    const linkingCodes = linkingSnapshot.exists() ? linkingSnapshot.val() : {};
+    
+    let deletedCodes = [];
+    
+    // Find and delete all codes for this Twitter ID
+    for (const [code, data] of Object.entries(linkingCodes)) {
+      if (data.twitterId === twitterId) {
+        const codeRef = ref(database, `linkingCodes/${code}`);
+        await set(codeRef, null); // Delete the code
+        deletedCodes.push({
+          code,
+          twitterUsername: data.twitterUsername,
+          telegramUsername: data.telegramUsername,
+          isUsed: data.isUsed
+        });
+        console.log(`✅ CLEANUP: Deleted code ${code}`);
+      }
+    }
+    
+    res.json({
+      success: true,
+      message: `Cleaned up ${deletedCodes.length} linking codes`,
+      deletedCodes
+    });
+    
+  } catch (error) {
+    console.error('Error in cleanup linking endpoint:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Get user banner endpoint
 app.get('/api/user-banner/:twitterId', async (req, res) => {
   try {
@@ -1011,51 +1120,52 @@ app.get('/api/user-banner/:twitterId', async (req, res) => {
   }
 });
 
-// Get user profile with proper stats aggregation
+// 🔧 IMPROVED: Get user profile with enhanced debugging and call retrieval
 app.get('/api/user-profile/:twitterId', async (req, res) => {
   try {
     const { twitterId } = req.params;
-    console.log(`🔍 Fetching profile for Twitter ID: ${twitterId}`);
+    console.log(`🔍 PROFILE: Fetching profile for Twitter ID: ${twitterId}`);
     
     // Get linking codes to find Telegram username
     const linkingCodesRef = ref(database, 'linkingCodes');
     const linkingSnapshot = await get(linkingCodesRef);
     const linkingCodes = linkingSnapshot.exists() ? linkingSnapshot.val() : {};
     
-    console.log(`📊 Found ${Object.keys(linkingCodes).length} linking codes in database`);
-    
-    // 🔍 DEBUG: Log all linking codes to see what's in the database
-    Object.entries(linkingCodes).forEach(([code, data]) => {
-      console.log(`🔗 Code ${code}:`, {
-        twitterId: data.twitterId,
-        twitterUsername: data.twitterUsername,
-        isUsed: data.isUsed,
-        telegramUsername: data.telegramUsername,
-        telegramUserId: data.telegramUserId,
-        hasAllFields: !!(data.twitterId && data.twitterUsername && data.isUsed)
-      });
-    });
+    console.log(`📊 PROFILE: Found ${Object.keys(linkingCodes).length} linking codes in database`);
     
     // Find Telegram username for this Twitter ID
     let telegramUsername = null;
     let linkedData = null;
+    let allTelegramUsernames = []; // Store all possible usernames for this Twitter ID
+    
     for (const [code, data] of Object.entries(linkingCodes)) {
-      if (data.twitterId === twitterId && data.isUsed === true) {
-        // Try different possible fields for telegram username
-        telegramUsername = data.telegramUsername || data.telegramUserId;
-        linkedData = data;
-        console.log(`✅ FOUND MATCH for Twitter ID ${twitterId}:`, {
-          code,
-          telegramUsername,
-          twitterUsername: data.twitterUsername,
-          isUsed: data.isUsed
+      if (data.twitterId === twitterId) {
+        console.log(`📋 PROFILE: Found code ${code} for Twitter ID:`, {
+          isUsed: data.isUsed,
+          telegramUsername: data.telegramUsername,
+          twitterUsername: data.twitterUsername
         });
-        break;
+        
+        // Collect all telegram usernames (current and historical)
+        if (data.telegramUsername && data.telegramUsername !== 'undefined' && data.telegramUsername !== null) {
+          allTelegramUsernames.push(data.telegramUsername);
+        }
+        
+        // Use the most recent used one as primary
+        if (data.isUsed === true && data.telegramUsername && data.telegramUsername !== 'undefined') {
+          telegramUsername = data.telegramUsername;
+          linkedData = data;
+          console.log(`✅ PROFILE: Using primary telegram username: ${telegramUsername}`);
+        }
       }
     }
     
-    if (!telegramUsername) {
-      console.log(`❌ No linked Telegram account found for Twitter ID: ${twitterId}`);
+    // Remove duplicates from all usernames
+    allTelegramUsernames = [...new Set(allTelegramUsernames)];
+    console.log(`📋 PROFILE: All telegram usernames found:`, allTelegramUsernames);
+    
+    if (!telegramUsername && allTelegramUsernames.length === 0) {
+      console.log(`❌ PROFILE: No linked Telegram account found for Twitter ID: ${twitterId}`);
       return res.json({ 
         success: true, 
         data: {
@@ -1065,18 +1175,51 @@ app.get('/api/user-profile/:twitterId', async (req, res) => {
           winRate: 0,
           bestCall: 0,
           recentCalls: [],
-          isLinked: false
+          isLinked: false,
+          debug: {
+            twitterId,
+            totalLinkingCodes: Object.keys(linkingCodes).length,
+            allTelegramUsernames: [],
+            primaryUsername: null
+          }
         }
       });
     }
     
-    console.log(`✅ Found linked Telegram: ${telegramUsername}`);
+    // If no primary username but we have historical ones, use the first one
+    if (!telegramUsername && allTelegramUsernames.length > 0) {
+      telegramUsername = allTelegramUsernames[0];
+      console.log(`⚠️ PROFILE: No active link, using historical username: ${telegramUsername}`);
+    }
     
-    // Get all calls and filter by Telegram username
+    console.log(`✅ PROFILE: Using telegram username: ${telegramUsername}`);
+    
+    // Get all calls and filter by ALL possible Telegram usernames
     const calls = await db.getAllActiveCalls();
-    const userCalls = calls.filter(call => call.username === telegramUsername);
+    let userCalls = [];
     
-    console.log(`📊 Found ${userCalls.length} calls for user`);
+    // Search calls with ALL telegram usernames (current + historical)
+    const searchUsernames = telegramUsername ? [telegramUsername, ...allTelegramUsernames] : allTelegramUsernames;
+    const uniqueSearchUsernames = [...new Set(searchUsernames)];
+    
+    console.log(`🔍 PROFILE: Searching calls with usernames:`, uniqueSearchUsernames);
+    
+    for (const username of uniqueSearchUsernames) {
+      const callsForUsername = calls.filter(call => call.username === username);
+      console.log(`📊 PROFILE: Found ${callsForUsername.length} calls for username: ${username}`);
+      userCalls = userCalls.concat(callsForUsername);
+    }
+    
+    // Remove duplicate calls (in case of overlap)
+    const uniqueCalls = userCalls.reduce((acc, call) => {
+      if (!acc.find(existingCall => existingCall.id === call.id)) {
+        acc.push(call);
+      }
+      return acc;
+    }, []);
+    userCalls = uniqueCalls;
+    
+    console.log(`📊 PROFILE: Total unique calls found: ${userCalls.length}`);
     
     // Calculate stats
     const totalCalls = userCalls.length;
@@ -1090,25 +1233,30 @@ app.get('/api/user-profile/:twitterId', async (req, res) => {
     );
     
     // Transform calls for frontend
-    const transformedCalls = userCalls.map(call => ({
-      id: call.id,
-      contractAddress: call.contractAddress,
-      createdAt: call.createdAt,
-      token: {
-        name: call.tokenName,
-        symbol: call.tokenSymbol
-      },
-      prices: {
-        entry: call.entryPrice,
-        current: call.currentPrice,
-        entryMarketCap: call.entryMarketCap,
-        currentMarketCap: call.currentMarketCap
-      },
-      performance: {
-        pnlPercent: call.pnlPercent || 0,
-        score: call.score || 0
-      }
-    }));
+    const transformedCalls = userCalls
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)) // Sort by newest first
+      .map(call => ({
+        id: call.id,
+        contractAddress: call.contractAddress,
+        createdAt: call.createdAt,
+        token: {
+          name: call.tokenName,
+          symbol: call.tokenSymbol
+        },
+        prices: {
+          entry: call.entryPrice,
+          current: call.currentPrice,
+          entryMarketCap: call.entryMarketCap,
+          currentMarketCap: call.currentMarketCap
+        },
+        performance: {
+          pnlPercent: call.pnlPercent || 0,
+          score: call.score || 0
+        },
+        user: {
+          username: call.username // Include which username made this call
+        }
+      }));
     
     const profileData = {
       totalCalls,
@@ -1118,13 +1266,25 @@ app.get('/api/user-profile/:twitterId', async (req, res) => {
       bestCall,
       recentCalls: transformedCalls.slice(0, 20),
       isLinked: true,
-      linkedData
+      linkedData,
+      debug: {
+        twitterId,
+        primaryTelegramUsername: telegramUsername,
+        allTelegramUsernames: uniqueSearchUsernames,
+        totalLinkingCodes: Object.keys(linkingCodes).length,
+        callsFound: userCalls.length,
+        callsByUsername: uniqueSearchUsernames.map(username => ({
+          username,
+          callCount: calls.filter(call => call.username === username).length
+        }))
+      }
     };
     
-    console.log('📊 Profile stats calculated:', {
+    console.log('📊 PROFILE: Profile stats calculated:', {
       totalCalls,
       winRate: winRate.toFixed(1),
-      totalScore: totalScore.toFixed(1)
+      totalScore: totalScore.toFixed(1),
+      usernamesSearched: uniqueSearchUsernames.length
     });
     
     res.json({ success: true, data: profileData });
