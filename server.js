@@ -100,7 +100,13 @@ app.get('/api/calls', async (req, res) => {
             });
             
             // Calculate PnL - use ATH only if it was reached AFTER the call
-            // 🔥 NEW PnL CALCULATION SYSTEM
+            // 🔥 NEW PnL CALCULATION SYSTEM with corruption check
+            if (pnlService.shouldResetMaxPnl(call, tokenData)) {
+              console.log(`🔄 Resetting corrupted maxPnl for call ${call.id}`);
+              await db.updateCall(call.id, { maxPnl: 0 });
+              call.maxPnl = 0;
+            }
+            
             const pnlPercent = pnlService.calculatePnlForCall(call, tokenData);
             console.log(`🔥 NEW PnL calculated: ${pnlPercent.toFixed(2)}%`);
             
@@ -1735,7 +1741,13 @@ async function autoRecalculateScores() {
             current24hVolume: tokenData.volume24h
           });
           
-          // Calculate PnL with new logic
+          // Calculate PnL with new logic and corruption check
+          if (pnlService.shouldResetMaxPnl(call, tokenData)) {
+            console.log(`🔄 Resetting corrupted maxPnl for call ${call.id}`);
+            await db.updateCall(call.id, { maxPnl: 0 });
+            call.maxPnl = 0;
+          }
+          
           let pnlPercent = 0;
           let bestMarketCap = tokenData.marketCap;
           

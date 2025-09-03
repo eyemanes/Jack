@@ -35,9 +35,31 @@ class PnlCalculationService {
       return 0;
     }
 
+    // Validate maxPnl - it should be reasonable
+    const maxPnlPercent = maxPnl / 100; // Convert from percentage to decimal
+    const maxPossiblePnl = Math.max(
+      (currentMcap / mcapAtCall) - 1,
+      athMcap > 0 ? (athMcap / mcapAtCall) - 1 : 0
+    );
+    
+    // If maxPnl is unreasonably high, reset it
+    if (maxPnlPercent > maxPossiblePnl * 2) {
+      console.log(`⚠️ Suspicious maxPnl detected: ${maxPnl}% (${maxPnlPercent}x), max possible: ${(maxPossiblePnl * 100).toFixed(2)}%. Resetting.`);
+      maxPnl = 0;
+    }
+
     const now = Date.now();
     let pnl = (currentMcap / mcapAtCall) - 1;
-    let peakPnl = maxPnl;
+    let peakPnl = maxPnl / 100; // Convert from percentage to decimal
+    
+    console.log(`🔍 PnL Calculation Debug:`, {
+      currentPnl: (pnl * 100).toFixed(2) + '%',
+      maxPnlFromDB: maxPnl + '%',
+      peakPnlDecimal: peakPnl.toFixed(4),
+      entryMcap: mcapAtCall,
+      currentMcap: currentMcap,
+      athMcap: athMcap
+    });
 
     // Fresh Call Optimization: If call is less than 1 minute old and token is at ATH
     const fresh = now - callTime < 60_000; // 1 minute
@@ -62,11 +84,22 @@ class PnlCalculationService {
 
     // Update peak PnL
     peakPnl = Math.max(peakPnl, pnl);
+    
+    console.log(`📈 Peak PnL updated: ${(peakPnl * 100).toFixed(2)}%`);
 
-    // Rule 2: 2x Lock Rule
+    // Rule 2: 2x Lock Rule - Only apply if we actually reached 2x (100% gain)
     if (peakPnl >= 1.0) {
-      pnl = peakPnl; // Never follow downside after 2x
-      console.log(`🚀 2x Rule: Locking at peak PnL (${(pnl * 100).toFixed(2)}%)`);
+      // Check if the peak PnL was actually achieved with real data
+      const peakMcap = mcapAtCall * (1 + peakPnl);
+      const maxPossibleMcap = Math.max(currentMcap, athMcap);
+      
+      // Only lock if the peak was actually achievable with real market cap data
+      if (maxPossibleMcap >= peakMcap * 0.9) { // Allow 10% tolerance
+        pnl = peakPnl; // Never follow downside after 2x
+        console.log(`🚀 2x Rule: Locking at peak PnL (${(pnl * 100).toFixed(2)}%)`);
+      } else {
+        console.log(`⚠️ 2x Rule: Peak PnL ${(peakPnl * 100).toFixed(2)}% not achievable with real data, using current PnL`);
+      }
     }
 
     // Rule 3: 10x Cap Rule
@@ -76,6 +109,18 @@ class PnlCalculationService {
     }
 
     const finalPnlPercent = pnl * 100;
+    
+    // Sanity check: PnL should not be impossible
+    const maxPossiblePnlPercent = Math.max(
+      ((currentMcap / mcapAtCall) - 1) * 100,
+      athMcap > 0 ? ((athMcap / mcapAtCall) - 1) * 100 : 0
+    );
+    
+    if (finalPnlPercent > maxPossiblePnlPercent * 1.5) {
+      console.log(`🚨 Impossible PnL detected: ${finalPnlPercent.toFixed(2)}%, max possible: ${maxPossiblePnlPercent.toFixed(2)}%. Capping.`);
+      return maxPossiblePnlPercent;
+    }
+    
     console.log(`✅ Final PnL: ${finalPnlPercent.toFixed(2)}%`);
 
     return finalPnlPercent;
@@ -170,6 +215,29 @@ class PnlCalculationService {
    */
   clearAllCache() {
     this.cache.clear();
+  }
+
+  /**
+   * Reset corrupted maxPnl values
+   * @param {Object} call - Call object from database
+   * @param {Object} tokenData - Current token data
+   * @returns {boolean} True if maxPnl was reset
+   */
+  shouldResetMaxPnl(call, tokenData) {
+    const maxPnl = parseFloat(call.maxPnl) || 0;
+    const entryMcap = parseFloat(call.entryMarketCap) || 0;
+    const currentMcap = parseFloat(tokenData.marketCap) || 0;
+    const athMcap = parseFloat(tokenData.ath) || 0;
+    
+    if (maxPnl <= 0 || entryMcap <= 0) return false;
+    
+    const maxPossiblePnl = Math.max(
+      ((currentMcap / entryMcap) - 1) * 100,
+      athMcap > 0 ? ((athMcap / entryMcap) - 1) * 100 : 0
+    );
+    
+    // If maxPnl is more than 2x the maximum possible PnL, it's corrupted
+    return maxPnl > maxPossiblePnl * 2;
   }
 }
 
