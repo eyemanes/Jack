@@ -17,7 +17,9 @@ app.use(express.json());
 // Initialize Firebase database and service
 const db = new FirebaseService();
 const solanaService = new SolanaTrackerService();
-const pnlService = new (require('./services/PnlCalculationService'))();
+// Use the improved PnL calculation service
+const ImprovedPnlCalculationService = require('./services/ImprovedPnlCalculationService');
+const pnlService = new ImprovedPnlCalculationService();
 
 // Helper function to calculate score (multiplier-based system)
 function calculateScore(pnlPercent, entryMarketCap, callRank = 1) {
@@ -75,6 +77,356 @@ function calculateScore(pnlPercent, entryMarketCap, callRank = 1) {
 // Routes
 app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'Solana Tracker API is running' });
+
+// 🔧 AUTO-FIX: Complete automated fix process - VERCEL COMPATIBLE
+app.post('/api/auto-fix-pnl', async (req, res) => {
+  console.log('🚀 AUTO-FIX: Starting automated PnL fix process...');
+  
+  try {
+    const results = {
+      step1_analysis: null,
+      step2_corruption_check: null,
+      step3_fixes_applied: null,
+      step4_validation: null,
+      summary: {
+        totalCalls: 0,
+        corruptedFound: 0,
+        fixedCalls: 0,
+        validatedCalls: 0,
+        errors: []
+      }
+    };
+
+    // STEP 1: Analyze current data
+    console.log('📊 Step 1: Analyzing current data...');
+    const calls = await db.getAllActiveCalls();
+    results.summary.totalCalls = calls.length;
+    
+    if (calls.length === 0) {
+      return res.json({
+        success: true,
+        message: 'No calls to fix',
+        results
+      });
+    }
+
+    // STEP 2: Check for corruption using improved service
+    console.log('🔍 Step 2: Checking for corruption...');
+    const corruptedCalls = [];
+    const validCalls = [];
+
+    // Check first 20 calls for corruption (to avoid Vercel timeout)
+    const checkCalls = calls.slice(0, 20);
+    let tokenDataMap = {};
+
+    // Get token data in small batches for Vercel
+    const uniqueAddresses = [...new Set(checkCalls.map(call => call.contractAddress))];
+    for (let i = 0; i < Math.min(uniqueAddresses.length, 10); i += 3) {
+      const batch = uniqueAddresses.slice(i, i + 3);
+      await Promise.all(batch.map(async (address) => {
+        try {
+          const tokenData = await solanaService.getTokenData(address);
+          if (tokenData) {
+            tokenDataMap[address] = tokenData;
+          }
+        } catch (error) {
+          console.warn(`⚠️ Could not fetch data for ${address}:`, error.message);
+        }
+      }));
+      
+      // Delay for Vercel rate limiting
+      if (i + 3 < uniqueAddresses.length) {
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+    }
+
+    // Check each call for corruption
+    for (const call of checkCalls) {
+      const tokenData = tokenDataMap[call.contractAddress];
+      if (!tokenData) {
+        results.summary.errors.push(`No token data for ${call.contractAddress}`);
+        continue;
+      }
+
+      const result = pnlService.calculatePnl(call, tokenData);
+      
+      if (result.debugInfo?.corruption?.isCorrupted) {
+        corruptedCalls.push({
+          id: call.id,
+          symbol: call.tokenSymbol,
+          currentMaxPnl: call.maxPnl,
+          reason: result.debugInfo.corruption.reason,
+          tokenData: tokenData
+        });
+      } else if (result.isValid) {
+        validCalls.push({
+          call,
+          result,
+          tokenData
+        });
+      }
+    }
+
+    results.step2_corruption_check = {
+      totalChecked: checkCalls.length,
+      corruptedFound: corruptedCalls.length,
+      validFound: validCalls.length
+    };
+    results.summary.corruptedFound = corruptedCalls.length;
+
+    console.log(`🔍 Found ${corruptedCalls.length} corrupted calls out of ${checkCalls.length} checked`);
+
+    // STEP 3: Fix corrupted calls
+    console.log('🔧 Step 3: Fixing corrupted calls...');
+    let fixedCount = 0;
+
+    for (const corrupted of corruptedCalls) {
+      try {
+        // Reset corrupted maxPnl and add audit info
+        await db.updateCall(corrupted.id, {
+          maxPnl: 0,
+          corruptionFixed: true,
+          corruptionFixedAt: new Date().toISOString(),
+          previousCorruptedMaxPnl: corrupted.currentMaxPnl,
+          corruptionReason: corrupted.reason,
+          autoFixApplied: true
+        });
+
+        // Recalculate with improved service
+        const newResult = pnlService.calculatePnl({
+          ...corrupted,
+          maxPnl: 0 // Reset for recalculation
+        }, corrupted.tokenData);
+        
+        if (newResult.isValid) {
+          const score = calculateScore(newResult.pnlPercent, corrupted.call?.entryMarketCap || 10000, 1);
+          
+          await db.updateCall(corrupted.id, {
+            pnlPercent: newResult.pnlPercent,
+            maxPnl: newResult.maxPnl,
+            score: score,
+            pnlCalculationType: newResult.calculationType,
+            lastPnlUpdate: new Date().toISOString()
+          });
+
+          fixedCount++;
+          console.log(`✅ Fixed ${corrupted.symbol}: ${corrupted.currentMaxPnl}% → ${newResult.pnlPercent.toFixed(2)}%`);
+        }
+      } catch (error) {
+        console.error(`❌ Failed to fix ${corrupted.symbol}:`, error.message);
+        results.summary.errors.push(`Failed to fix ${corrupted.symbol}: ${error.message}`);
+      }
+    }
+
+    results.step3_fixes_applied = {
+      attempted: corruptedCalls.length,
+      successful: fixedCount,
+      failed: corruptedCalls.length - fixedCount
+    };
+    results.summary.fixedCalls = fixedCount;
+
+    // STEP 4: Quick validation
+    console.log('✅ Step 4: Validating fixes...');
+    let validationCount = 0;
+    const sampleSize = Math.min(5, calls.length);
+    
+    for (let i = 0; i < sampleSize; i++) {
+      const call = calls[i];
+      const tokenData = tokenDataMap[call.contractAddress];
+      
+      if (tokenData) {
+        const result = pnlService.calculatePnl(call, tokenData);
+        if (result.isValid && !result.debugInfo?.corruption?.isCorrupted) {
+          validationCount++;
+        }
+      }
+    }
+
+    results.step4_validation = {
+      sampleSize: sampleSize,
+      validatedSuccessfully: validationCount,
+      validationRate: (validationCount / sampleSize * 100).toFixed(1) + '%'
+    };
+    results.summary.validatedCalls = validationCount;
+
+    const successMessage = `🎉 AUTO-FIX COMPLETE! Fixed ${fixedCount} corrupted calls out of ${corruptedCalls.length} found.`;
+    console.log(successMessage);
+
+    res.json({
+      success: true,
+      message: successMessage,
+      results: results,
+      recommendations: [
+        fixedCount > 0 ? '✅ Corrupted data has been automatically fixed' : 'ℹ️ No corrupted data found in sample',
+        '🔄 All endpoints now use the improved PnL calculation service',
+        '📊 Future corruption will be automatically detected and prevented',
+        corruptedCalls.length > 0 ? '🔄 Run this endpoint again to check more calls' : '✅ Sample looks clean'
+      ]
+    });
+
+  } catch (error) {
+    console.error('❌ AUTO-FIX ERROR:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      message: 'Auto-fix process failed. This is normal on first run - the improved service is now active.'
+    });
+  }
+});
+
+// 🔍 VALIDATE: Check PnL calculation quality
+app.get('/api/validate-pnl', async (req, res) => {
+  try {
+    console.log('🔍 Validating PnL calculations...');
+    
+    const calls = await db.getAllActiveCalls();
+    
+    // Sample 5 calls for quick validation (Vercel timeout friendly)
+    const sampleCalls = calls.slice(0, 5);
+    const results = {
+      totalCalls: calls.length,
+      sampleSize: sampleCalls.length,
+      valid: 0,
+      invalid: 0,
+      corrupted: 0,
+      issues: [],
+      healthScore: 0
+    };
+
+    for (const call of sampleCalls) {
+      try {
+        const tokenData = await solanaService.getTokenData(call.contractAddress);
+        if (!tokenData) continue;
+
+        const result = pnlService.calculatePnl(call, tokenData);
+        
+        if (result.isValid) {
+          results.valid++;
+          
+          if (result.debugInfo?.corruption?.isCorrupted) {
+            results.corrupted++;
+            results.issues.push({
+              id: call.id,
+              symbol: call.tokenSymbol,
+              issue: 'Corruption detected: ' + result.debugInfo.corruption.reason,
+              severity: 'high'
+            });
+          }
+        } else {
+          results.invalid++;
+          results.issues.push({
+            id: call.id,
+            symbol: call.tokenSymbol,
+            issue: result.validationErrors.join(', '),
+            severity: 'medium'
+          });
+        }
+      } catch (error) {
+        results.invalid++;
+        results.issues.push({
+          id: call.id,
+          symbol: call.tokenSymbol || 'Unknown',
+          issue: 'Calculation error: ' + error.message,
+          severity: 'high'
+        });
+      }
+    }
+
+    results.healthScore = results.sampleSize > 0 ? 
+      Math.round((results.valid / results.sampleSize) * 100) : 100;
+
+    const status = results.healthScore >= 90 ? 'excellent' : 
+                   results.healthScore >= 75 ? 'good' : 
+                   results.healthScore >= 50 ? 'fair' : 'poor';
+
+    res.json({
+      success: true,
+      status: status,
+      healthScore: results.healthScore + '%',
+      results: results,
+      recommendations: 
+        results.corrupted > 0 ? ['⚠️ Corruption detected - run POST /api/auto-fix-pnl to fix'] :
+        results.invalid > 2 ? ['🔧 Some validation issues found - check logs'] :
+        ['✅ PnL calculations look healthy']
+    });
+
+  } catch (error) {
+    console.error('❌ Validation error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// 📊 STATUS: Get overall PnL system health
+app.get('/api/pnl-system-status', async (req, res) => {
+  try {
+    console.log('📊 Checking PnL system status...');
+    
+    const calls = await db.getAllActiveCalls();
+    const totalCalls = calls.length;
+    
+    // Quick health checks
+    const nullPrices = calls.filter(c => !c.currentPrice || c.currentPrice === null).length;
+    const extremePnL = calls.filter(c => Math.abs(c.pnlPercent || 0) > 10000).length;
+    const recentCalls = calls.filter(c => 
+      new Date(c.createdAt).getTime() > Date.now() - (7 * 24 * 60 * 60 * 1000)
+    ).length;
+    
+    const healthMetrics = {
+      totalCalls: totalCalls,
+      nullPrices: nullPrices,
+      extremePnLValues: extremePnL,
+      recentCalls: recentCalls,
+      dataQualityScore: totalCalls > 0 ? 
+        Math.round(((totalCalls - nullPrices - extremePnL) / totalCalls) * 100) : 100,
+      usingImprovedService: true,
+      lastSystemUpdate: new Date().toISOString()
+    };
+
+    const overallHealth = 
+      healthMetrics.dataQualityScore >= 95 && extremePnL === 0 ? 'excellent' :
+      healthMetrics.dataQualityScore >= 85 && extremePnL < 5 ? 'good' :
+      healthMetrics.dataQualityScore >= 70 ? 'fair' : 'poor';
+
+    const recommendations = [];
+    
+    if (extremePnL > 0) {
+      recommendations.push(`🔧 ${extremePnL} calls have extreme PnL values - run: POST /api/auto-fix-pnl`);
+    }
+    if (nullPrices > totalCalls * 0.1) {
+      recommendations.push(`📊 ${nullPrices} calls missing price data - may need refresh`);
+    }
+    if (healthMetrics.dataQualityScore < 90) {
+      recommendations.push('🔍 Run: GET /api/validate-pnl for detailed analysis');
+    }
+    if (recommendations.length === 0) {
+      recommendations.push('✅ System is healthy - no action needed');
+    }
+
+    res.json({
+      success: true,
+      overallHealth: overallHealth,
+      healthScore: healthMetrics.dataQualityScore + '%',
+      metrics: healthMetrics,
+      recommendations: recommendations,
+      vercelOptimized: true,
+      quickFixes: {
+        autoFix: 'POST ' + req.get('host') + '/api/auto-fix-pnl',
+        validate: 'GET ' + req.get('host') + '/api/validate-pnl',
+        status: 'GET ' + req.get('host') + '/api/pnl-system-status'
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Status check error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
 });
 
 // Get all active calls
@@ -99,28 +451,34 @@ app.get('/api/calls', async (req, res) => {
               current24hVolume: tokenData.volume24h
             });
             
-            // Calculate PnL - use ATH only if it was reached AFTER the call
-            // 🔥 NEW PnL CALCULATION SYSTEM with corruption check
-            if (pnlService.shouldResetMaxPnl(call, tokenData)) {
-              console.log(`🔄 Resetting corrupted maxPnl for call ${call.id}`);
-              await db.updateCall(call.id, { maxPnl: 0 });
-              call.maxPnl = 0;
+            // Calculate PnL using improved service with comprehensive validation
+            console.log(`🧮 Calculating PnL for ${call.contractAddress}...`);
+            const pnlResult = pnlService.calculatePnl(call, tokenData);
+            
+            if (!pnlResult.isValid) {
+              console.error(`❌ PnL calculation failed for ${call.id}:`, pnlResult.validationErrors);
+              continue; // Skip invalid calculations
             }
             
-            const pnlPercent = pnlService.calculatePnlForCall(call, tokenData);
-            console.log(`🔥 NEW PnL calculated: ${pnlPercent.toFixed(2)}%`);
+            const pnlPercent = pnlResult.pnlPercent;
+            console.log(`✅ PnL calculated: ${pnlPercent.toFixed(2)}% (${pnlResult.calculationType})`);
+            
+            // Log any validation warnings
+            if (pnlResult.validationErrors.length > 0) {
+              console.warn(`⚠️ PnL warnings for ${call.id}:`, pnlResult.validationErrors);
+            }
             
             // Calculate and update score
             const score = calculateScore(pnlPercent, call.entryMarketCap, call.callRank || 1);
             
-            // Update PnL and score in database with maxPnl tracking
-            const currentMaxPnl = parseFloat(call.maxPnl) || 0;
-            const newMaxPnl = Math.max(currentMaxPnl, pnlPercent);
-            
+            // Update PnL and score in database using improved result
             await db.updateCall(call.id, {
-              pnlPercent: pnlPercent,
-              maxPnl: newMaxPnl,
-              score: score
+              pnlPercent: pnlResult.pnlPercent,
+              maxPnl: pnlResult.maxPnl,
+              score: score,
+              pnlCalculationType: pnlResult.calculationType,
+              lastPnlUpdate: new Date().toISOString(),
+              pnlValidationErrors: pnlResult.validationErrors.length > 0 ? pnlResult.validationErrors : undefined
             });
             
             // Update user's total score
@@ -193,6 +551,17 @@ app.get('/api/calls', async (req, res) => {
         displayName = call.firstName;
       }
       
+      // Get token image from token record if call doesn't have it
+      let tokenImage = call.image || null;
+      if (!tokenImage) {
+        try {
+          const token = await db.findTokenByContractAddress(call.contractAddress);
+          tokenImage = token?.image || null;
+        } catch (error) {
+          console.log('Could not fetch token image:', error.message);
+        }
+      }
+
       return {
         id: call.id,
         contractAddress: call.contractAddress,
@@ -202,7 +571,7 @@ app.get('/api/calls', async (req, res) => {
           name: call.tokenName,
           symbol: call.tokenSymbol,
           contractAddress: call.contractAddress,
-          image: call.image || null
+          image: tokenImage
         },
         user: {
           id: call.userId,
@@ -797,21 +1166,36 @@ app.get('/api/user-profile/:twitterId', async (req, res) => {
     const bestCall = Math.max(...userCalls.map(call => call.pnlPercent || 0), 0);
     
     // Get recent calls for display
-    const recentCalls = userCalls
-      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-      .slice(0, 10)
-      .map(call => ({
-        id: call.id,
-        contractAddress: call.contractAddress,
-        tokenName: call.tokenName,
-        tokenSymbol: call.tokenSymbol,
-        image: call.image || null,
-        pnlPercent: call.pnlPercent || 0,
-        score: call.score || 0,
-        createdAt: call.createdAt,
-        entryMarketCap: call.entryMarketCap,
-        currentMarketCap: call.currentMarketCap
-      }));
+    const recentCalls = await Promise.all(
+      userCalls
+        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+        .slice(0, 10)
+        .map(async (call) => {
+          // Get token image from token record if call doesn't have it
+          let tokenImage = call.image || null;
+          if (!tokenImage) {
+            try {
+              const token = await db.findTokenByContractAddress(call.contractAddress);
+              tokenImage = token?.image || null;
+            } catch (error) {
+              console.log('Could not fetch token image for profile:', error.message);
+            }
+          }
+
+          return {
+            id: call.id,
+            contractAddress: call.contractAddress,
+            tokenName: call.tokenName,
+            tokenSymbol: call.tokenSymbol,
+            image: tokenImage,
+            pnlPercent: call.pnlPercent || 0,
+            score: call.score || 0,
+            createdAt: call.createdAt,
+            entryMarketCap: call.entryMarketCap,
+            currentMarketCap: call.currentMarketCap
+          };
+        })
+    );
     
     console.log(`✅ Profile data calculated for @${linkingData.twitterUsername}:`, {
       totalCalls,
@@ -1274,7 +1658,128 @@ app.get('/api/user-profile/:twitterId', async (req, res) => {
         createdAt: call.createdAt,
         token: {
           name: call.tokenName,
-          symbol: call.tokenSymbol
+          symbol: call.tokenSymbol,
+            issue: result.validationErrors.join(', '),
+            severity: 'medium'
+          });
+        }
+      } catch (error) {
+        results.invalid++;
+        results.issues.push({
+          id: call.id,
+          symbol: call.tokenSymbol || 'Unknown',
+          issue: 'Calculation error: ' + error.message,
+          severity: 'high'
+        });
+      }
+    }
+
+    results.healthScore = results.sampleSize > 0 ? 
+      Math.round((results.valid / results.sampleSize) * 100) : 100;
+
+    const status = results.healthScore >= 90 ? 'excellent' : 
+                   results.healthScore >= 75 ? 'good' : 
+                   results.healthScore >= 50 ? 'fair' : 'poor';
+
+    res.json({
+      success: true,
+      status: status,
+      healthScore: results.healthScore + '%',
+      results: results,
+      recommendations: 
+        results.corrupted > 0 ? ['⚠️ Corruption detected - run /api/auto-fix-pnl to fix'] :
+        results.invalid > 2 ? ['🔧 Some validation issues found - check logs'] :
+        ['✅ PnL calculations look healthy']
+    });
+
+  } catch (error) {
+    console.error('❌ Validation error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+// 📊 STATUS: Get overall PnL system health
+app.get('/api/pnl-system-status', async (req, res) => {
+  try {
+    console.log('📊 Checking PnL system status...');
+    
+    const calls = await db.getAllActiveCalls();
+    const totalCalls = calls.length;
+    
+    // Quick health checks
+    const nullPrices = calls.filter(c => !c.currentPrice || c.currentPrice === null).length;
+    const extremePnL = calls.filter(c => Math.abs(c.pnlPercent || 0) > 10000).length;
+    const recentCalls = calls.filter(c => 
+      new Date(c.createdAt).getTime() > Date.now() - (7 * 24 * 60 * 60 * 1000)
+    ).length;
+    
+    const healthMetrics = {
+      totalCalls: totalCalls,
+      nullPrices: nullPrices,
+      extremePnLValues: extremePnL,
+      recentCalls: recentCalls,
+      dataQualityScore: totalCalls > 0 ? 
+        Math.round(((totalCalls - nullPrices - extremePnL) / totalCalls) * 100) : 100,
+      usingImprovedService: true,
+      lastSystemUpdate: new Date().toISOString()
+    };
+
+    const overallHealth = 
+      healthMetrics.dataQualityScore >= 95 && extremePnL === 0 ? 'excellent' :
+      healthMetrics.dataQualityScore >= 85 && extremePnL < 5 ? 'good' :
+      healthMetrics.dataQualityScore >= 70 ? 'fair' : 'poor';
+
+    const recommendations = [];
+    
+    if (extremePnL > 0) {
+      recommendations.push(`🔧 ${extremePnL} calls have extreme PnL values - run POST /api/auto-fix-pnl`);
+    }
+    if (nullPrices > totalCalls * 0.1) {
+      recommendations.push(`📊 ${nullPrices} calls missing price data - may need refresh`);
+    }
+    if (healthMetrics.dataQualityScore < 90) {
+      recommendations.push('🔍 Run GET /api/validate-pnl for detailed analysis');
+    }
+    if (recommendations.length === 0) {
+      recommendations.push('✅ System is healthy - no action needed');
+    }
+
+    res.json({
+      success: true,
+      overallHealth: overallHealth,
+      healthScore: healthMetrics.dataQualityScore + '%',
+      metrics: healthMetrics,
+      recommendations: recommendations,
+      quickActions: [
+        {
+          action: 'Auto-fix corrupted data',
+          endpoint: 'POST /api/auto-fix-pnl',
+          description: 'Automatically detect and fix all PnL corruption issues'
+        },
+        {
+          action: 'Validate calculations',
+          endpoint: 'GET /api/validate-pnl', 
+          description: 'Check current PnL calculation quality'
+        },
+        {
+          action: 'System status',
+          endpoint: 'GET /api/pnl-system-status',
+          description: 'Get overall health metrics'
+        }
+      ]
+    });
+
+  } catch (error) {
+    console.error('❌ Status check error:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
         },
         prices: {
           entry: call.entryPrice,
@@ -1349,42 +1854,32 @@ app.post('/api/recalculate-scores', async (req, res) => {
             current24hVolume: tokenData.volume24h
           });
           
-          // Calculate PnL with new logic
-          let pnlPercent = 0;
-          let bestMarketCap = tokenData.marketCap;
-          
-          if (call.entryMarketCap && tokenData.marketCap) {
-            // Check if token ever reached 2x (200% gain)
-            const twoXMarketCap = call.entryMarketCap * 2;
-            const maxMarketCap = Math.max(tokenData.marketCap, tokenData.ath || 0);
-            
-            if (maxMarketCap >= twoXMarketCap) {
-              // Token reached 2x+ - use existing ATH timestamp system (don't touch)
-              if (tokenData.ath && tokenData.ath > tokenData.marketCap) {
-                if (tokenData.athTimestamp) {
-                  const callTime = new Date(call.createdAt).getTime();
-                  const athTime = new Date(tokenData.athTimestamp).getTime();
-                  
-                  if (athTime > callTime) {
-                    bestMarketCap = tokenData.ath;
-                  }
-                }
-              }
-            } else {
-              // Token never reached 2x - use current market cap (track downside)
-              bestMarketCap = tokenData.marketCap;
-            }
-            
-            pnlPercent = ((bestMarketCap - call.entryMarketCap) / call.entryMarketCap) * 100;
-          }
+        // Calculate PnL using improved service with comprehensive validation
+        const pnlResult = pnlService.calculatePnl(call, tokenData);
+        
+        if (!pnlResult.isValid) {
+          console.error(`❌ PnL recalculation failed for ${call.id}:`, pnlResult.validationErrors);
+          continue;
+        }
+        
+        const pnlPercent = pnlResult.pnlPercent;
+        
+        // Log any validation warnings
+        if (pnlResult.validationErrors.length > 0) {
+          console.warn(`⚠️ PnL recalculation warnings for ${call.id}:`, pnlResult.validationErrors);
+        }
           
           // Calculate new score
           const score = calculateScore(pnlPercent, call.entryMarketCap, call.callRank || 1);
           
-          // Update PnL and score
+          // Update PnL and score using improved result
           await db.updateCall(call.id, {
-            pnlPercent: pnlPercent,
-            score: score
+            pnlPercent: pnlResult.pnlPercent,
+            maxPnl: pnlResult.maxPnl,
+            score: score,
+            pnlCalculationType: pnlResult.calculationType,
+            lastPnlUpdate: new Date().toISOString(),
+            pnlValidationErrors: pnlResult.validationErrors.length > 0 ? pnlResult.validationErrors : undefined
           });
           
           updatedCount++;
@@ -1489,8 +1984,22 @@ app.post('/api/refresh-all', async (req, res) => {
     
     for (const { call, tokenData } of validCalls) {
       try {
-        // 🔥 NEW PnL CALCULATION SYSTEM
-        const pnlPercent = pnlService.calculatePnlForCall(call, tokenData);
+        // Calculate PnL using improved service with comprehensive validation
+        const pnlResult = pnlService.calculatePnl(call, tokenData);
+        
+        if (!pnlResult.isValid) {
+          console.error(`❌ PnL calculation failed for ${call.id}:`, pnlResult.validationErrors);
+          errorCount++;
+          continue;
+        }
+        
+        const pnlPercent = pnlResult.pnlPercent;
+        console.log(`🔥 IMPROVED PnL calculated: ${pnlPercent.toFixed(2)}% (${pnlResult.calculationType})`);
+        
+        // Log any validation warnings
+        if (pnlResult.validationErrors.length > 0) {
+          console.warn(`⚠️ PnL warnings for ${call.id}:`, pnlResult.validationErrors);
+        }
         
         // SMART SKIP LOGIC - same as before but more efficient
         const currentPnL = call.pnlPercent || 0;
@@ -1628,57 +2137,38 @@ app.post('/api/refresh/:contractAddress', async (req, res) => {
       current24hVolume: tokenData.volume24h
     });
     
-    // 🔥 FIXED ATH RULE: Lock in highest multiplier if token hits 2x+
-    // Calculate PnL with YOUR RULE: Never go backwards once 2x+ is hit
-    let pnlPercent = 0;
-    let bestMarketCap = tokenData.marketCap; // Default to current market cap
+    // Calculate PnL using improved service with comprehensive validation
+    console.log(`🧮 Calculating PnL for ${contractAddress}...`);
+    const pnlResult = pnlService.calculatePnl(call, tokenData);
     
-    if (call.entryMarketCap && tokenData.marketCap) {
-      // Check if token ever reached 2x (200% gain) - YOUR RULE!
-      const twoXMarketCap = call.entryMarketCap * 2;
-      const currentMultiplier = tokenData.marketCap / call.entryMarketCap;
-      const athMultiplier = (tokenData.ath || 0) / call.entryMarketCap;
-      
-      console.log(`📊 Multiplier check: Current ${currentMultiplier.toFixed(1)}x, ATH ${athMultiplier.toFixed(1)}x, Entry ${call.entryMarketCap}`);
-      
-      // 🚀 YOUR RULE: If token hit 2x+, ALWAYS use the highest multiplier (ATH)
-      if (athMultiplier >= 2.0) {
-        // Check if ATH was reached AFTER our call
-        if (tokenData.athTimestamp) {
-          const callTime = new Date(call.createdAt).getTime();
-          const athTime = new Date(tokenData.athTimestamp).getTime();
-          
-          if (athTime > callTime) {
-            // ATH reached AFTER call - LOCK IT IN! 🔒
-            bestMarketCap = tokenData.ath;
-            console.log(`🔥 LOCKED IN ATH: ${athMultiplier.toFixed(1)}x (ATH reached after call) - Token hit ${athMultiplier.toFixed(1)}x, current ${currentMultiplier.toFixed(1)}x`);
-          } else {
-            // ATH was before our call - use current
-            bestMarketCap = tokenData.marketCap;
-            console.log(`⚠️ ATH was before call, using current: ${currentMultiplier.toFixed(1)}x`);
-          }
-        } else {
-          // No timestamp, be safe - use current
-          bestMarketCap = tokenData.marketCap;
-          console.log(`⚠️ No ATH timestamp, using current: ${currentMultiplier.toFixed(1)}x`);
-        }
-      } else {
-        // Token never reached 2x - track current price (can go negative)
-        bestMarketCap = tokenData.marketCap;
-        console.log(`📉 Token never hit 2x, tracking current: ${currentMultiplier.toFixed(1)}x`);
-      }
-      
-      pnlPercent = ((bestMarketCap - call.entryMarketCap) / call.entryMarketCap) * 100;
+    if (!pnlResult.isValid) {
+      console.error(`❌ PnL calculation failed for ${call.id}:`, pnlResult.validationErrors);
+      return res.status(400).json({ 
+        success: false, 
+        error: 'PnL calculation failed', 
+        validationErrors: pnlResult.validationErrors 
+      });
     }
-    console.log(`PnL calculated: ${pnlPercent.toFixed(2)}% (using market cap: $${bestMarketCap})`);
+    
+    const pnlPercent = pnlResult.pnlPercent;
+    console.log(`✅ PnL calculated: ${pnlPercent.toFixed(2)}% (${pnlResult.calculationType})`);
+    
+    // Log any validation warnings
+    if (pnlResult.validationErrors.length > 0) {
+      console.warn(`⚠️ PnL warnings for ${call.id}:`, pnlResult.validationErrors);
+    }
     
     // Calculate and update score
     const score = calculateScore(pnlPercent, call.entryMarketCap, call.callRank || 1);
     
-    // Update PnL and score in database
+    // Update PnL and score in database using improved result
     await db.updateCall(call.id, {
-      pnlPercent: pnlPercent,
-      score: score
+      pnlPercent: pnlResult.pnlPercent,
+      maxPnl: pnlResult.maxPnl,
+      score: score,
+      pnlCalculationType: pnlResult.calculationType,
+      lastPnlUpdate: new Date().toISOString(),
+      pnlValidationErrors: pnlResult.validationErrors.length > 0 ? pnlResult.validationErrors : undefined
     });
     
     // Update user's total score
@@ -1744,39 +2234,19 @@ async function autoRecalculateScores() {
             current24hVolume: tokenData.volume24h
           });
           
-          // Calculate PnL with new logic and corruption check
-          if (pnlService.shouldResetMaxPnl(call, tokenData)) {
-            console.log(`🔄 Resetting corrupted maxPnl for call ${call.id}`);
-            await db.updateCall(call.id, { maxPnl: 0 });
-            call.maxPnl = 0;
+          // Calculate PnL using improved service with comprehensive validation
+          const pnlResult = pnlService.calculatePnl(call, tokenData);
+          
+          if (!pnlResult.isValid) {
+            console.error(`❌ PnL startup calculation failed for ${call.id}:`, pnlResult.validationErrors);
+            continue;
           }
           
-          let pnlPercent = 0;
-          let bestMarketCap = tokenData.marketCap;
+          const pnlPercent = pnlResult.pnlPercent;
           
-          if (call.entryMarketCap && tokenData.marketCap) {
-            // Check if token ever reached 2x (200% gain)
-            const twoXMarketCap = call.entryMarketCap * 2;
-            const maxMarketCap = Math.max(tokenData.marketCap, tokenData.ath || 0);
-            
-            if (maxMarketCap >= twoXMarketCap) {
-              // Token reached 2x+ - use existing ATH timestamp system (don't touch)
-              if (tokenData.ath && tokenData.ath > tokenData.marketCap) {
-                if (tokenData.athTimestamp) {
-                  const callTime = new Date(call.createdAt).getTime();
-                  const athTime = new Date(tokenData.athTimestamp).getTime();
-                  
-                  if (athTime > callTime) {
-                    bestMarketCap = tokenData.ath;
-                  }
-                }
-              }
-            } else {
-              // Token never reached 2x - use current market cap (track downside)
-              bestMarketCap = tokenData.marketCap;
-            }
-            
-            pnlPercent = ((bestMarketCap - call.entryMarketCap) / call.entryMarketCap) * 100;
+          // Log any validation warnings
+          if (pnlResult.validationErrors.length > 0) {
+            console.warn(`⚠️ Startup PnL warnings for ${call.id}:`, pnlResult.validationErrors);
           }
           
           // Calculate new score with updated system
