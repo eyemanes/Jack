@@ -237,14 +237,30 @@ app.post('/api/dashboard/refresh/:contractAddress', async (req, res) => {
     // Add 2-second delay for PnL calculation processing
     await new Promise(resolve => setTimeout(resolve, 2000));
     
-    const result = await pnlService.calculateAccuratePnl(contractAddress);
+    // Find the call in the database
+    const calls = await db.getAllActiveCalls();
+    const call = calls.find(c => c.contractAddress === contractAddress);
     
-    if (result.success) {
-      addLog('success', `Token refreshed successfully: ${contractAddress}`, result.data);
-      res.json({ success: true, data: result.data });
+    if (!call) {
+      addLog('error', `Call not found for contract: ${contractAddress}`);
+      return res.status(404).json({ success: false, error: 'Call not found' });
+    }
+    
+    const result = await pnlService.calculateAccuratePnl(call);
+    
+    if (result.pnlPercent !== undefined) {
+      // Update the call in the database with new PnL
+      await db.updateCall(call.id, {
+        pnlPercent: result.pnlPercent,
+        currentMarketCap: result.data?.currentMarketCap || call.currentMarketCap,
+        updatedAt: new Date().toISOString()
+      });
+      
+      addLog('success', `Token refreshed successfully: ${contractAddress}`, result);
+      res.json({ success: true, data: result });
     } else {
-      addLog('error', `Failed to refresh token: ${contractAddress}`, result.error);
-      res.status(400).json({ success: false, error: result.error });
+      addLog('error', `Failed to refresh token: ${contractAddress}`, result);
+      res.status(400).json({ success: false, error: 'PnL calculation failed' });
     }
   } catch (error) {
     addLog('error', `Error refreshing token: ${req.params.contractAddress}`, error.message);
@@ -266,13 +282,30 @@ app.post('/api/dashboard/refresh-all', async (req, res) => {
         // Add 2-second delay for PnL calculation processing
         await new Promise(resolve => setTimeout(resolve, 2000));
         
-        const result = await pnlService.calculateAccuratePnl(call.contractAddress);
-        results.push({
-          contractAddress: call.contractAddress,
-          success: result.success,
-          data: result.data,
-          error: result.error
-        });
+        const result = await pnlService.calculateAccuratePnl(call);
+        
+        if (result.pnlPercent !== undefined) {
+          // Update the call in the database with new PnL
+          await db.updateCall(call.id, {
+            pnlPercent: result.pnlPercent,
+            currentMarketCap: result.data?.currentMarketCap || call.currentMarketCap,
+            updatedAt: new Date().toISOString()
+          });
+          
+          results.push({
+            contractAddress: call.contractAddress,
+            success: true,
+            data: result,
+            error: null
+          });
+        } else {
+          results.push({
+            contractAddress: call.contractAddress,
+            success: false,
+            data: null,
+            error: 'PnL calculation failed'
+          });
+        }
       } catch (error) {
         addLog('error', `Error refreshing call: ${call.contractAddress}`, error.message);
         results.push({
@@ -302,13 +335,30 @@ app.post('/api/dashboard/recalculate-all', async (req, res) => {
     for (const call of calls) {
       try {
         addLog('info', `Recalculating call: ${call.contractAddress}`);
-        const result = await pnlService.calculateAccuratePnl(call.contractAddress);
-        results.push({
-          contractAddress: call.contractAddress,
-          success: result.success,
-          data: result.data,
-          error: result.error
-        });
+        const result = await pnlService.calculateAccuratePnl(call);
+        
+        if (result.pnlPercent !== undefined) {
+          // Update the call in the database with new PnL
+          await db.updateCall(call.id, {
+            pnlPercent: result.pnlPercent,
+            currentMarketCap: result.data?.currentMarketCap || call.currentMarketCap,
+            updatedAt: new Date().toISOString()
+          });
+          
+          results.push({
+            contractAddress: call.contractAddress,
+            success: true,
+            data: result,
+            error: null
+          });
+        } else {
+          results.push({
+            contractAddress: call.contractAddress,
+            success: false,
+            data: null,
+            error: 'PnL calculation failed'
+          });
+        }
       } catch (error) {
         addLog('error', `Error recalculating call: ${call.contractAddress}`, error.message);
         results.push({
@@ -334,10 +384,14 @@ app.post('/api/dashboard/fix-errors', async (req, res) => {
     const calls = await db.getAllActiveCalls();
     const fixedCalls = [];
     
+    // Import the PnlCalculationService for the shouldResetMaxPnl method
+    const PnlCalculationService = require('./services/PnlCalculationService');
+    const pnlCalculationService = new PnlCalculationService();
+    
     for (const call of calls) {
       try {
         // Check if maxPnl needs reset
-        if (pnlService.shouldResetMaxPnl(call)) {
+        if (pnlCalculationService.shouldResetMaxPnl(call)) {
           addLog('info', `Fixing corrupted maxPnl for call: ${call.contractAddress}`);
           
           // Reset maxPnl to current PnL

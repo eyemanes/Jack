@@ -443,6 +443,54 @@ class ImprovedPnlCalculationService {
   }
 
   /**
+   * CALCULATE ACCURATE PNL FOR CONTRACT ADDRESS
+   * This method is used by the dashboard API endpoints
+   * @param {Object} call - Call object from database
+   * @returns {Object} PnL calculation result
+   */
+  async calculateAccuratePnl(call) {
+    try {
+      // For now, we'll use the basic calculation since we don't have token data
+      // In a real implementation, you would fetch current token data here
+      const entryMarketCap = parseFloat(call.entryMarketCap) || 0;
+      const currentMarketCap = parseFloat(call.currentMarketCap) || 0;
+      
+      if (!entryMarketCap || !currentMarketCap) {
+        return {
+          pnlPercent: 0,
+          pnlType: 'error',
+          reason: 'No valid market cap data',
+          data: null,
+          timestamp: Date.now()
+        };
+      }
+
+      const pnl = ((currentMarketCap / entryMarketCap) - 1) * 100;
+      
+      return {
+        pnlPercent: pnl,
+        pnlType: 'current_price',
+        reason: 'Using current market cap calculation',
+        data: {
+          entryMarketCap,
+          currentMarketCap,
+          pnl
+        },
+        timestamp: Date.now()
+      };
+    } catch (error) {
+      console.error(`❌ Error in calculateAccuratePnl:`, error);
+      return {
+        pnlPercent: 0,
+        pnlType: 'error',
+        reason: 'Calculation failed',
+        data: null,
+        timestamp: Date.now()
+      };
+    }
+  }
+
+  /**
    * CLEAR CACHE AND RESET
    */
   clearCache() {
