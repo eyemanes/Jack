@@ -148,24 +148,34 @@ app.get('/api/dashboard/stats', async (req, res) => {
   try {
     addLog('info', 'Fetching dashboard stats');
     
-    const calls = await db.getAllActiveCalls();
-    const tokens = await db.getAllTokens();
+    // Use cached data if available, otherwise fetch from database
+    const calls = cachedCalls.length > 0 ? cachedCalls : await db.getAllActiveCalls();
+    
+    // Get tokens count from Firebase
+    let tokensCount = 0;
+    try {
+      const tokensRef = ref(database, 'tokens');
+      const tokensSnapshot = await get(tokensRef);
+      tokensCount = tokensSnapshot.exists() ? tokensSnapshot.size : 0;
+    } catch (error) {
+      addLog('warning', 'Could not fetch tokens count:', error.message);
+    }
     
     const stats = {
       totalCalls: calls.length,
-      totalTokens: tokens.length,
+      totalTokens: tokensCount,
       activeCalls: calls.filter(call => call.status === 'active').length,
       completedCalls: calls.filter(call => call.status === 'completed').length,
       totalUsers: [...new Set(calls.map(call => call.userId))].length,
       averagePnl: calls.length > 0 ? calls.reduce((sum, call) => sum + (call.pnlPercent || 0), 0) / calls.length : 0,
-      bestCall: Math.max(...calls.map(call => call.pnlPercent || 0), 0),
-      worstCall: Math.min(...calls.map(call => call.pnlPercent || 0), 0),
+      bestCall: calls.length > 0 ? Math.max(...calls.map(call => call.pnlPercent || 0)) : 0,
+      worstCall: calls.length > 0 ? Math.min(...calls.map(call => call.pnlPercent || 0)) : 0,
       systemUptime: process.uptime(),
       memoryUsage: process.memoryUsage(),
       lastUpdated: new Date().toISOString()
     };
     
-    addLog('info', 'Dashboard stats fetched successfully', stats);
+    addLog('success', 'Dashboard stats fetched successfully', stats);
     res.json({ success: true, data: stats });
   } catch (error) {
     addLog('error', 'Failed to fetch dashboard stats', error.message);
@@ -238,6 +248,46 @@ app.post('/api/dashboard/refresh/:contractAddress', async (req, res) => {
     }
   } catch (error) {
     addLog('error', `Error refreshing token: ${req.params.contractAddress}`, error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/dashboard/refresh-all', async (req, res) => {
+  try {
+    addLog('info', 'Starting bulk refresh of all calls');
+    
+    const calls = cachedCalls.length > 0 ? cachedCalls : await db.getAllActiveCalls();
+    const results = [];
+    
+    for (const call of calls) {
+      try {
+        addLog('info', `Refreshing call: ${call.contractAddress}`);
+        
+        // Add 2-second delay for PnL calculation processing
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        const result = await pnlService.calculateAccuratePnl(call.contractAddress);
+        results.push({
+          contractAddress: call.contractAddress,
+          success: result.success,
+          data: result.data,
+          error: result.error
+        });
+      } catch (error) {
+        addLog('error', `Error refreshing call: ${call.contractAddress}`, error.message);
+        results.push({
+          contractAddress: call.contractAddress,
+          success: false,
+          error: error.message
+        });
+      }
+    }
+    
+    const successful = results.filter(r => r.success).length;
+    addLog('success', `Bulk refresh completed. ${successful}/${results.length} successful`);
+    res.json({ success: true, data: results });
+  } catch (error) {
+    addLog('error', 'Bulk refresh failed', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
