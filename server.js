@@ -22,9 +22,14 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'Solana Tracker API is running' });
 });
 
+// Favicon route to prevent 404 errors
+app.get('/favicon.ico', (req, res) => {
+  res.status(204).end();
+});
+
 // Homepage: PnL Management Dashboard
 app.get('/', (req, res) => {
-  res.send(`
+  const html = `
 <!DOCTYPE html>
 <html>
 <head>
@@ -63,11 +68,10 @@ app.get('/', (req, res) => {
             try {
                 const response = await fetch('/api/status');
                 const data = await response.json();
-                document.getElementById('statusText').innerHTML = \`
-                    <strong>Total Calls:</strong> \${data.totalCalls}<br>
-                    <strong>Corrupted Calls:</strong> \${data.corruptedCalls}<br>
-                    <strong>Health:</strong> \${data.health}
-                \`;
+                document.getElementById('statusText').innerHTML = 
+                    '<strong>Total Calls:</strong> ' + data.totalCalls + '<br>' +
+                    '<strong>Corrupted Calls:</strong> ' + data.corruptedCalls + '<br>' +
+                    '<strong>Health:</strong> ' + data.health;
                 showResult(data, 'System Status');
             } catch (error) {
                 showResult({error: error.message}, 'Error');
@@ -81,7 +85,7 @@ app.get('/', (req, res) => {
                 const data = await response.json();
                 showResult(data, 'Fix Results');
                 if (data.success) {
-                    alert(\`Success! Fixed \${data.fixedCount} corrupted calls.\`);
+                    alert('Success! Fixed ' + data.fixedCount + ' corrupted calls.');
                     checkStatus();
                 }
             } catch (error) {
@@ -91,7 +95,7 @@ app.get('/', (req, res) => {
         
         function showResult(data, title) {
             const result = document.getElementById('result');
-            result.textContent = title + ':\n\n' + JSON.stringify(data, null, 2);
+            result.textContent = title + ':\\n\\n' + JSON.stringify(data, null, 2);
             result.style.display = 'block';
         }
         
@@ -100,7 +104,8 @@ app.get('/', (req, res) => {
     </script>
 </body>
 </html>
-  `);
+`;
+  res.send(html);
 });
 
 // Status endpoint
