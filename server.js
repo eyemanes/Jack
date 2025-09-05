@@ -26,9 +26,9 @@ app.use(express.json());
 // Initialize Firebase database and service
 const db = new FirebaseService();
 const solanaService = new SolanaTrackerService();
-// Use the correct PnL calculation service (matches exact user specifications)
-const CorrectPnlCalculationService = require('./services/CorrectPnlCalculationService');
-const pnlService = new CorrectPnlCalculationService();
+// Use the deterministic PnL calculation service (race-safe, drift-free)
+const DeterministicPnlCalculationService = require('./services/DeterministicPnlCalculationService');
+const pnlService = new DeterministicPnlCalculationService();
 
 // Real-time data cache
 let cachedCalls = [];
@@ -48,135 +48,150 @@ function setupRealtimeListeners() {
       cachedCalls = calls;
       addLog('info', `Real-time update: ${calls.length} calls loaded`);
       
-      // Emit to all connected clients
+      // Emit to connected clients
       io.emit('calls_updated', calls);
-    } else {
-      cachedCalls = [];
-      addLog('warning', 'Real-time update: No calls found');
-      io.emit('calls_updated', []);
     }
-  }, (error) => {
-    addLog('error', 'Real-time listener error:', error.message);
   });
 
-  // Listen to tokens changes
-  const tokensRef = ref(database, 'tokens');
-  onValue(tokensRef, (snapshot) => {
+  // Listen to stats changes
+  const statsRef = ref(database, 'stats');
+  onValue(statsRef, (snapshot) => {
     if (snapshot.exists()) {
-      addLog('info', `Real-time update: ${snapshot.size} tokens loaded`);
-      io.emit('tokens_updated', snapshot.size);
+      cachedStats = snapshot.val();
+      addLog('info', 'Real-time stats update received');
+      
+      // Emit to connected clients
+      io.emit('stats_updated', cachedStats);
     }
   });
-
-  addLog('success', 'Real-time Firebase listeners initialized');
 }
 
-// In-memory log storage for real-time dashboard
+// Logging system
 const logs = [];
-const maxLogs = 1000;
-
-// Helper function to add logs
-function addLog(level, message, data = null) {
+function addLog(type, message, data = null) {
   const logEntry = {
     timestamp: new Date().toISOString(),
-    level,
+    type,
     message,
     data: data ? JSON.stringify(data, null, 2) : null
   };
-  logs.unshift(logEntry);
-  if (logs.length > maxLogs) {
-    logs.pop();
+  
+  logs.push(logEntry);
+  
+  // Keep only last 1000 logs
+  if (logs.length > 1000) {
+    logs.splice(0, logs.length - 1000);
   }
-  console.log(`[${logEntry.timestamp}] ${level.toUpperCase()}: ${message}`);
+  
+  console.log(`[${logEntry.timestamp}] ${type.toUpperCase()}: ${message}`);
+  if (data) {
+    console.log('Data:', data);
+  }
 }
 
-// Helper function to calculate score (multiplier-based system)
-function calculateScore(pnlPercent, entryMarketCap, callRank = 1) {
-  // Convert PnL percentage to multiplier (e.g., 100% = 2x, 200% = 3x)
-  const multiplier = (pnlPercent / 100) + 1;
-  
-  let baseScore = 0;
-  
-  // Base Points based on multiplier
-  if (multiplier < 1) {
-    baseScore = -2; // below 1x
-  } else if (multiplier < 1.3) {
-    baseScore = -1; // 1x to 1.3x
-  } else if (multiplier <= 1.8) {
-    baseScore = 0; // 1.3x to 1.8x (inclusive)
-  } else if (multiplier < 5) {
-    baseScore = 1; // 1.8x to 5x
-  } else if (multiplier < 10) {
-    baseScore = 2; // 5x to 10x
-  } else if (multiplier < 20) {
-    baseScore = 3; // 10x to 20x
-  } else if (multiplier < 50) {
-    baseScore = 4; // 20x to 50x
-  } else if (multiplier < 100) {
-    baseScore = 7; // 50x to 100x
-  } else if (multiplier < 200) {
-    baseScore = 10; // 100x to 200x
-  } else {
-    baseScore = 15; // 200x or higher
-  }
-  
-  // Market Cap Multiplier (only applies to positive scores)
-  let marketCapMultiplier = 1;
-  if (baseScore > 0) {
-    if (entryMarketCap < 25000) {
-      marketCapMultiplier = 0.5; // Below $25k MC: ×0.5 (half points)
-    } else if (entryMarketCap < 50000) {
-      marketCapMultiplier = 0.75; // $25k - $50k MC: ×0.75 (25% reduced points)
-    } else if (entryMarketCap < 1000000) {
-      marketCapMultiplier = 1.0; // $50k - $1M MC: ×1.0 (normal points)
-    } else {
-      marketCapMultiplier = 1.5; // Above $1M MC: ×1.5 (50% bonus points)
+// Auto-recalculate scores on startup
+async function autoRecalculateScores() {
+  try {
+    addLog('info', 'Starting auto-recalculation of user scores...');
+    
+    const calls = await db.getAllActiveCalls();
+    const userScores = {};
+    
+    // Calculate scores for each user
+    for (const call of calls) {
+      if (call.user && call.user.username) {
+        const username = call.user.username;
+        if (!userScores[username]) {
+          userScores[username] = {
+            totalCalls: 0,
+            totalScore: 0,
+            wins: 0,
+            calls: []
+          };
+        }
+        
+        userScores[username].totalCalls++;
+        userScores[username].calls.push(call);
+        
+        const pnl = parseFloat(call.pnlPercent) || 0;
+        if (pnl > 0) {
+          userScores[username].wins++;
+        }
+        
+        // Calculate score based on PnL
+        const score = Math.max(0, pnl); // Only positive PnL counts
+        userScores[username].totalScore += score;
+      }
     }
+    
+    // Update user scores in database
+    for (const [username, data] of Object.entries(userScores)) {
+      const winRate = data.totalCalls > 0 ? (data.wins / data.totalCalls) * 100 : 0;
+      
+      await db.updateUser(username, {
+        totalCalls: data.totalCalls,
+        totalScore: data.totalScore,
+        winRate: winRate,
+        lastUpdated: new Date().toISOString()
+      });
+    }
+    
+    addLog('success', `Auto-recalculation completed. Updated ${Object.keys(userScores).length} users.`);
+  } catch (error) {
+    addLog('error', 'Auto-recalculation failed', error.message);
   }
-  
-  const finalScore = baseScore * marketCapMultiplier;
-  return finalScore;
 }
 
-// Routes
+// Health check endpoint
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', message: 'Solana Tracker API is running' });
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    memory: process.memoryUsage()
+  });
 });
 
-// Dashboard API endpoints
+// Dashboard stats endpoint
 app.get('/api/dashboard/stats', async (req, res) => {
   try {
     addLog('info', 'Fetching dashboard stats');
     
-    // Always fetch fresh data from database (don't rely on cache for Vercel)
+    // Always fetch fresh data from Firebase
     const calls = await db.getAllActiveCalls();
-    addLog('info', `Fetched ${calls.length} calls from database`);
+    const users = await db.getAllUsers();
     
-    // Get tokens count from Firebase
-    let tokensCount = 0;
-    try {
-      const tokensRef = ref(database, 'tokens');
-      const tokensSnapshot = await get(tokensRef);
-      tokensCount = tokensSnapshot.exists() ? tokensSnapshot.size : 0;
-      addLog('info', `Fetched ${tokensCount} tokens from database`);
-        } catch (error) {
-      addLog('warning', 'Could not fetch tokens count:', error.message);
-    }
+    const totalCalls = calls.length;
+    const activeCalls = calls.filter(call => {
+      const createdAt = new Date(call.createdAt || call.callTime);
+      const hoursSinceCall = (Date.now() - createdAt.getTime()) / (1000 * 60 * 60);
+      return hoursSinceCall < 24; // Active if less than 24 hours old
+    }).length;
+    
+    const totalUsers = users.length;
+    
+    // Calculate average PnL
+    const validPnls = calls
+      .map(call => parseFloat(call.pnlPercent))
+      .filter(pnl => !isNaN(pnl) && isFinite(pnl));
+    
+    const avgPnL = validPnls.length > 0 
+      ? validPnls.reduce((sum, pnl) => sum + pnl, 0) / validPnls.length 
+      : 0;
+    
+    // Find best call
+    const bestCall = validPnls.length > 0 ? Math.max(...validPnls) : 0;
     
     const stats = {
-      totalCalls: calls.length,
-      totalTokens: tokensCount,
-      activeCalls: calls.filter(call => call.status === 'active').length,
-      completedCalls: calls.filter(call => call.status === 'completed').length,
-      totalUsers: [...new Set(calls.map(call => call.userId))].length,
-      averagePnl: calls.length > 0 ? calls.reduce((sum, call) => sum + (call.pnlPercent || 0), 0) / calls.length : 0,
-      bestCall: calls.length > 0 ? Math.max(...calls.map(call => call.pnlPercent || 0)) : 0,
-      worstCall: calls.length > 0 ? Math.min(...calls.map(call => call.pnlPercent || 0)) : 0,
-      systemUptime: process.uptime(),
-      memoryUsage: process.memoryUsage(),
+      totalCalls,
+      activeCalls,
+      totalUsers,
+      avgPnL: parseFloat(avgPnL.toFixed(2)),
+      bestCall: parseFloat(bestCall.toFixed(2)),
       lastUpdated: new Date().toISOString()
     };
     
+    cachedStats = stats;
     addLog('success', 'Dashboard stats fetched successfully', stats);
     res.json({ success: true, data: stats });
   } catch (error) {
@@ -185,60 +200,48 @@ app.get('/api/dashboard/stats', async (req, res) => {
   }
 });
 
+// Dashboard calls endpoint
 app.get('/api/dashboard/calls', async (req, res) => {
   try {
     addLog('info', 'Fetching dashboard calls');
     
+    // Always fetch fresh data from Firebase
     const calls = await db.getAllActiveCalls();
-    addLog('info', `Fetched ${calls.length} calls from database`);
     
-    const transformedCalls = calls.map(call => ({
-        id: call.id,
-        contractAddress: call.contractAddress,
-      tokenName: call.tokenName,
-      tokenSymbol: call.tokenSymbol,
-      pnlPercent: call.pnlPercent || 0,
-      score: call.score || 0,
-      status: call.status || 'active',
-        createdAt: call.createdAt,
-        updatedAt: call.updatedAt,
-      userId: call.userId,
-          username: call.username,
-          entryMarketCap: call.entryMarketCap,
-      currentMarketCap: call.currentMarketCap,
-      image: call.image || null
-    }));
+    // Sort by PnL (highest first)
+    const sortedCalls = calls.sort((a, b) => {
+      const pnlA = parseFloat(a.pnlPercent) || 0;
+      const pnlB = parseFloat(b.pnlPercent) || 0;
+      return pnlB - pnlA;
+    });
     
-    addLog('info', `Fetched ${transformedCalls.length} calls for dashboard`);
-    res.json({ success: true, data: transformedCalls });
+    addLog('success', `Fetched ${sortedCalls.length} calls`);
+    res.json({ success: true, data: sortedCalls });
   } catch (error) {
     addLog('error', 'Failed to fetch dashboard calls', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
+// Dashboard logs endpoint
 app.get('/api/dashboard/logs', (req, res) => {
-  const limit = parseInt(req.query.limit) || 100;
-  const level = req.query.level;
-  
-  let filteredLogs = logs;
-  if (level) {
-    filteredLogs = logs.filter(log => log.level === level);
+  try {
+    const limit = parseInt(req.query.limit) || 100;
+    const logsToReturn = logs.slice(-limit).reverse();
+    res.json({ success: true, data: logsToReturn });
+  } catch (error) {
+    addLog('error', 'Failed to fetch logs', error.message);
+    res.status(500).json({ success: false, error: error.message });
   }
-  
-  res.json({ 
-    success: true, 
-    data: filteredLogs.slice(0, limit),
-    total: logs.length
-  });
 });
 
+// Single token refresh endpoint
 app.post('/api/dashboard/refresh/:contractAddress', async (req, res) => {
   try {
     const { contractAddress } = req.params;
     addLog('info', `Manual refresh requested for token: ${contractAddress}`);
     
-    // Add 3-second delay for PnL calculation processing (increased for better data)
+    // Add 3-second delay for PnL calculation processing
     await new Promise(resolve => setTimeout(resolve, 3000));
     
     // Find the call in the database
@@ -250,34 +253,28 @@ app.post('/api/dashboard/refresh/:contractAddress', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Call not found' });
     }
 
-    // Use correct calculation method
-    const result = await pnlService.calculateAccuratePnl(call);
+    // Use deterministic calculation method
+    const result = await pnlService.refreshCall(call);
     
-    if (result && result.pnlPercent !== undefined && !isNaN(result.pnlPercent)) {
-      // Check for corruption and fix if needed
-      const fixedCall = pnlService.fixCorruptedMaxPnl(call, result.data?.tokenData);
-      
-      // Update the call in the database with new PnL and maxPnl tracking
-      const currentMaxPnl = parseFloat(fixedCall.maxPnl) || 0;
-      const newMaxPnl = Math.max(currentMaxPnl, result.pnlPercent);
-      
+    if (result && result.success && result.pnlPercent !== undefined && !isNaN(result.pnlPercent)) {
+      // Update the call in the database with deterministic data
       await db.updateCall(call.id, {
         pnlPercent: result.pnlPercent,
-        maxPnl: newMaxPnl,
-        currentMarketCap: result.data?.currentMarketCap || call.currentMarketCap,
+        maxPnl: result.maxPnl,
+        currentMarketCap: result.data?.currentMcap || call.currentMarketCap,
+        maxMcapSinceCall: result.data?.maxMcapSinceCall,
+        maxMcapTimestamp: result.data?.maxMcapTimestamp,
+        milestones: result.data?.milestones || call.milestones || {},
         updatedAt: new Date().toISOString(),
-        ...(fixedCall.corruptionFixed && {
-          corruptionFixed: true,
-          corruptionFixedAt: fixedCall.corruptionFixedAt,
-          previousCorruptedMaxPnl: fixedCall.previousCorruptedMaxPnl
-        })
+        sourceStamp: result.data?.sourceStamp,
+        calculationType: result.calculationType
       });
       
       addLog('success', `Token refreshed successfully: ${contractAddress}`, result);
       res.json({ success: true, data: result });
     } else {
       addLog('error', `Invalid PnL result for ${contractAddress}:`, result);
-      res.status(400).json({ success: false, error: `PnL calculation failed: ${result?.reason || 'Unknown error'}` });
+      res.status(400).json({ success: false, error: `PnL calculation failed: ${result?.error || 'Unknown error'}` });
     }
   } catch (error) {
     addLog('error', `Error refreshing token: ${req.params.contractAddress}`, error.message);
@@ -285,199 +282,166 @@ app.post('/api/dashboard/refresh/:contractAddress', async (req, res) => {
   }
 });
 
+// Queue-driven refresh all endpoint
 app.post('/api/dashboard/refresh-all', async (req, res) => {
   try {
-    addLog('info', 'Starting bulk refresh of all calls');
+    addLog('info', 'Starting queue-driven refresh-all process');
     
     const calls = await db.getAllActiveCalls();
-    const results = [];
+    const batchId = `refresh_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     
+    // Create queue in Firebase
+    const queueRef = `queues/refreshAll/${batchId}`;
+    await db.set(queueRef, {
+      batchId,
+      status: 'pending',
+      totalItems: calls.length,
+      processedItems: 0,
+      createdAt: new Date().toISOString()
+    });
+    
+    // Add items to queue
     for (let i = 0; i < calls.length; i++) {
       const call = calls[i];
+      await db.set(`${queueRef}/items/${i}`, {
+        contractAddress: call.contractAddress,
+        callId: call.id,
+        status: 'pending',
+        createdAt: new Date().toISOString()
+      });
+    }
+    
+    // Process queue items sequentially to avoid race conditions
+    const results = [];
+    for (let i = 0; i < calls.length; i++) {
       try {
-        addLog('info', `Refreshing call ${i + 1}/${calls.length}: ${call.contractAddress}`);
+        const call = calls[i];
+        addLog('info', `Processing queue item ${i + 1}/${calls.length}: ${call.contractAddress}`);
         
-        // Add 4-second delay between each refresh to avoid rate limiting
-        if (i > 0) {
-          await new Promise(resolve => setTimeout(resolve, 4000));
-        }
+        // Update queue item status
+        await db.set(`${queueRef}/items/${i}/status`, 'processing');
         
-        // Use improved calculation method
-        const result = await pnlService.calculateAccuratePnl(call);
+        // Refresh call with deterministic calculation
+        const result = await pnlService.refreshCall(call);
         
-        if (result && result.pnlPercent !== undefined && !isNaN(result.pnlPercent)) {
-          // Update the call in the database with new PnL and maxPnl tracking
-          const currentMaxPnl = parseFloat(call.maxPnl) || 0;
-          const newMaxPnl = Math.max(currentMaxPnl, result.pnlPercent);
-          
+        if (result && result.success) {
+          // Update call in database
           await db.updateCall(call.id, {
             pnlPercent: result.pnlPercent,
-            maxPnl: newMaxPnl,
-            currentMarketCap: result.data?.currentMarketCap || call.currentMarketCap,
-            updatedAt: new Date().toISOString()
+            maxPnl: result.maxPnl,
+            currentMarketCap: result.data?.currentMcap || call.currentMarketCap,
+            maxMcapSinceCall: result.data?.maxMcapSinceCall,
+            maxMcapTimestamp: result.data?.maxMcapTimestamp,
+            milestones: result.data?.milestones || call.milestones || {},
+            updatedAt: new Date().toISOString(),
+            sourceStamp: result.data?.sourceStamp,
+            calculationType: result.calculationType
           });
           
+          await db.set(`${queueRef}/items/${i}/status`, 'completed');
           results.push({
             contractAddress: call.contractAddress,
             success: true,
             pnlPercent: result.pnlPercent,
-            maxPnl: newMaxPnl,
-            data: result
+            calculationType: result.calculationType
           });
-          
-          addLog('success', `Call refreshed: ${call.contractAddress}`, result);
         } else {
-          addLog('error', `Invalid PnL result for ${call.contractAddress}:`, result);
+          await db.set(`${queueRef}/items/${i}/status`, 'failed');
           results.push({
             contractAddress: call.contractAddress,
             success: false,
-            error: `PnL calculation failed: ${result?.reason || 'Unknown error'}`
+            error: result?.error || 'Unknown error'
           });
         }
-      } catch (error) {
-        addLog('error', `Error refreshing call: ${call.contractAddress}`, error.message);
-        results.push({
-          contractAddress: call.contractAddress,
-          success: false,
-          error: error.message
-        });
-      }
-    }
-    
-    const successful = results.filter(r => r.success).length;
-    addLog('success', `Bulk refresh completed. ${successful}/${results.length} successful`);
-    res.json({ success: true, data: results });
-  } catch (error) {
-    addLog('error', 'Bulk refresh failed', error.message);
-    res.status(500).json({ success: false, error: error.message });
-  }
-});
-
-// Alias for the frontend refresh-all endpoint (calls the same logic)
-app.post('/api/refresh-all', async (req, res) => {
-  try {
-    addLog('info', 'Starting bulk refresh of all calls (frontend endpoint)');
-    
-    const calls = await db.getAllActiveCalls();
-    const results = [];
-    
-    for (let i = 0; i < calls.length; i++) {
-      const call = calls[i];
-      try {
-        addLog('info', `Refreshing call ${i + 1}/${calls.length}: ${call.contractAddress}`);
         
-        // Add 4-second delay between each refresh to avoid rate limiting (same as dashboard)
-        if (i > 0) {
+        // Add delay between items to avoid rate limiting
+        if (i < calls.length - 1) {
           await new Promise(resolve => setTimeout(resolve, 4000));
         }
         
-            // Use correct calculation method
-    const result = await pnlService.calculateAccuratePnl(call);
-    
-    if (result && result.pnlPercent !== undefined && !isNaN(result.pnlPercent)) {
-      // Check for corruption and fix if needed
-      const fixedCall = pnlService.fixCorruptedMaxPnl(call, result.data?.tokenData);
-      
-      // Update the call in the database with new PnL and maxPnl tracking
-      const currentMaxPnl = parseFloat(fixedCall.maxPnl) || 0;
-      const newMaxPnl = Math.max(currentMaxPnl, result.pnlPercent);
-      
-      await db.updateCall(call.id, {
-        pnlPercent: result.pnlPercent,
-        maxPnl: newMaxPnl,
-        currentMarketCap: result.data?.currentMarketCap || call.currentMarketCap,
-        updatedAt: new Date().toISOString(),
-        ...(fixedCall.corruptionFixed && {
-          corruptionFixed: true,
-          corruptionFixedAt: fixedCall.corruptionFixedAt,
-          previousCorruptedMaxPnl: fixedCall.previousCorruptedMaxPnl
-        })
-      });
-          
-          results.push({
-            contractAddress: call.contractAddress,
-            success: true,
-            pnlPercent: result.pnlPercent,
-            maxPnl: newMaxPnl,
-            data: result
-          });
-          
-          addLog('success', `Call refreshed: ${call.contractAddress}`, result);
-        } else {
-          addLog('error', `Invalid PnL result for ${call.contractAddress}:`, result);
-          results.push({
-            contractAddress: call.contractAddress,
-            success: false,
-            error: `PnL calculation failed: ${result?.reason || 'Unknown error'}`
-          });
-        }
       } catch (error) {
-        addLog('error', `Error refreshing call: ${call.contractAddress}`, error.message);
+        addLog('error', `Error processing queue item ${i + 1}: ${calls[i].contractAddress}`, error.message);
+        await db.set(`${queueRef}/items/${i}/status`, 'failed');
         results.push({
-          contractAddress: call.contractAddress,
+          contractAddress: calls[i].contractAddress,
           success: false,
           error: error.message
         });
       }
     }
     
-    const successful = results.filter(r => r.success).length;
-    addLog('success', `Bulk refresh completed. ${successful}/${results.length} successful`);
-    res.json({ success: true, data: results });
+    // Update queue status
+    await db.set(`${queueRef}/status`, 'completed');
+    await db.set(`${queueRef}/completedAt`, new Date().toISOString());
+    
+    addLog('success', `Queue-driven refresh-all completed. Processed ${results.length} items`);
+    res.json({ success: true, data: results, batchId });
+    
   } catch (error) {
-    addLog('error', 'Bulk refresh failed', error.message);
+    addLog('error', 'Queue-driven refresh-all failed', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
+// Alias for refresh-all
+app.post('/api/refresh-all', async (req, res) => {
+  // Redirect to dashboard refresh-all
+  req.url = '/api/dashboard/refresh-all';
+  app._router.handle(req, res);
+});
+
+// Recalculate all endpoint
 app.post('/api/dashboard/recalculate-all', async (req, res) => {
   try {
-    addLog('info', 'Starting bulk recalculation of all calls');
+    addLog('info', 'Starting recalculation process');
     
     const calls = await db.getAllActiveCalls();
     const results = [];
     
     for (let i = 0; i < calls.length; i++) {
       const call = calls[i];
+      
       try {
-        addLog('info', `Recalculating call ${i + 1}/${calls.length}: ${call.contractAddress}`);
+        addLog('info', `Recalculating ${i + 1}/${calls.length}: ${call.contractAddress}`);
         
-        // Add 3-second delay between each recalculation to avoid rate limiting
-        if (i > 0) {
+        // Use deterministic calculation method
+        const result = await pnlService.refreshCall(call);
+        
+        if (result && result.success) {
+          // Update call in database
+          await db.updateCall(call.id, {
+            pnlPercent: result.pnlPercent,
+            maxPnl: result.maxPnl,
+            currentMarketCap: result.data?.currentMcap || call.currentMarketCap,
+            maxMcapSinceCall: result.data?.maxMcapSinceCall,
+            maxMcapTimestamp: result.data?.maxMcapTimestamp,
+            milestones: result.data?.milestones || call.milestones || {},
+            updatedAt: new Date().toISOString(),
+            sourceStamp: result.data?.sourceStamp,
+            calculationType: result.calculationType
+          });
+          
+          results.push({
+            contractAddress: call.contractAddress,
+            success: true,
+            pnlPercent: result.pnlPercent,
+            calculationType: result.calculationType
+          });
+        } else {
+          results.push({
+            contractAddress: call.contractAddress,
+            success: false,
+            error: result?.error || 'Unknown error'
+          });
+        }
+        
+        // Add delay between calculations
+        if (i < calls.length - 1) {
           await new Promise(resolve => setTimeout(resolve, 3000));
         }
         
-        // Use improved calculation method
-        const result = await pnlService.calculateAccuratePnl(call);
-        
-        if (result && result.pnlPercent !== undefined && !isNaN(result.pnlPercent)) {
-          // Update the call in the database with new PnL and maxPnl tracking
-          const currentMaxPnl = parseFloat(call.maxPnl) || 0;
-          const newMaxPnl = Math.max(currentMaxPnl, result.pnlPercent);
-          
-          await db.updateCall(call.id, {
-            pnlPercent: result.pnlPercent,
-            maxPnl: newMaxPnl,
-            currentMarketCap: result.data?.currentMarketCap || call.currentMarketCap,
-            updatedAt: new Date().toISOString()
-          });
-          
-          results.push({
-            contractAddress: call.contractAddress,
-            success: true,
-            pnlPercent: result.pnlPercent,
-            maxPnl: newMaxPnl,
-            data: result
-          });
-        } else {
-          results.push({
-            contractAddress: call.contractAddress,
-            success: false,
-            error: `PnL calculation failed: ${result?.reason || 'Unknown error'}`
-          });
-        }
       } catch (error) {
-        addLog('error', `Error recalculating call: ${call.contractAddress}`, error.message);
+        addLog('error', `Error recalculating ${call.contractAddress}`, error.message);
         results.push({
           contractAddress: call.contractAddress,
           success: false,
@@ -486,62 +450,64 @@ app.post('/api/dashboard/recalculate-all', async (req, res) => {
       }
     }
     
-    const successful = results.filter(r => r.success).length;
-    addLog('success', `Bulk recalculation completed. ${successful}/${results.length} successful`);
+    addLog('success', `Recalculation completed. Processed ${results.length} calls`);
     res.json({ success: true, data: results });
+    
   } catch (error) {
-    addLog('error', 'Bulk recalculation failed', error.message);
+    addLog('error', 'Recalculation failed', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
+// Fix errors endpoint (now uses anomaly detection)
 app.post('/api/dashboard/fix-errors', async (req, res) => {
   try {
-    addLog('info', 'Starting corruption fixing process');
+    addLog('info', 'Starting anomaly detection and fixing process');
     
     const calls = await db.getAllActiveCalls();
     const fixedCalls = [];
     
     for (const call of calls) {
       try {
-        // Get fresh token data to check for corruption
-        const SolanaTrackerService = require('./services/SolanaTrackerService');
-        const solanaService = new SolanaTrackerService();
+        // Get fresh token data for anomaly detection
         const tokenData = await solanaService.getTokenData(call.contractAddress);
         
         if (tokenData) {
-          // Check if maxPnl needs reset using corruption detection
-          if (pnlService.shouldResetMaxPnl(call, tokenData)) {
-            addLog('info', `Fixing corrupted maxPnl for call: ${call.contractAddress}`);
-            
-            // Fix corrupted maxPnl
-            const fixedCall = pnlService.fixCorruptedMaxPnl(call, tokenData);
-            
-            await db.updateCall(call.id, {
-              maxPnl: fixedCall.maxPnl,
-              corruptionFixed: true,
-              corruptionFixedAt: fixedCall.corruptionFixedAt,
-              previousCorruptedMaxPnl: fixedCall.previousCorruptedMaxPnl
-            });
-            
-            fixedCalls.push({
-              contractAddress: call.contractAddress,
-              fixed: 'maxPnl',
-              oldValue: call.maxPnl,
-              newValue: fixedCall.maxPnl,
-              reason: 'Corruption detected and fixed'
-            });
+          // Use deterministic calculation to detect anomalies
+          const result = await pnlService.calculateDeterministicPnl(call, tokenData);
+          
+          if (result && result.success) {
+            // Check if there were anomalies detected
+            if (result.data?.anomalyCheck?.isAnomaly) {
+              addLog('info', `Anomaly detected for ${call.contractAddress}: ${result.data.anomalyCheck.reason}`);
+              
+              // Reset max mcap to current mcap to clear anomaly
+              await db.updateCall(call.id, {
+                maxMcapSinceCall: result.data.currentMcap,
+                maxMcapTimestamp: Date.now(),
+                anomalyDetected: true,
+                anomalyReason: result.data.anomalyCheck.reason,
+                anomalyFixedAt: new Date().toISOString()
+              });
+              
+              fixedCalls.push({
+                contractAddress: call.contractAddress,
+                fixed: 'anomaly_detected',
+                reason: result.data.anomalyCheck.reason,
+                zScore: result.data.anomalyCheck.zScore
+              });
+            }
           }
         }
       } catch (error) {
-        addLog('error', `Error fixing call: ${call.contractAddress}`, error.message);
+        addLog('error', `Error checking anomalies for ${call.contractAddress}`, error.message);
       }
     }
     
-    addLog('success', `Corruption fixing completed. Fixed ${fixedCalls.length} calls`);
+    addLog('success', `Anomaly detection completed. Fixed ${fixedCalls.length} calls`);
     res.json({ success: true, data: fixedCalls });
   } catch (error) {
-    addLog('error', 'Error fixing process failed', error.message);
+    addLog('error', 'Anomaly detection process failed', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
@@ -556,726 +522,287 @@ app.get('/', (req, res) => {
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Jack of all Scans - Backend Dashboard</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
-            min-height: 100vh;
-            color: #333;
-        }
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-        .header {
-            background: rgba(255, 255, 255, 0.95);
-            border-radius: 15px;
-            padding: 30px;
-            margin-bottom: 30px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
-            text-align: center;
-        }
-        .header h1 {
-            color: #2c3e50;
-            font-size: 2.5em;
-            margin-bottom: 10px;
-        }
-        .header p {
-            color: #7f8c8d;
-            font-size: 1.2em;
-        }
-        .dashboard-grid {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 30px;
-            margin-bottom: 30px;
-        }
-        .card {
-            background: rgba(255, 255, 255, 0.95);
-            border-radius: 15px;
-            padding: 25px;
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
-        }
-        .card h2 {
-            color: #2c3e50;
-            margin-bottom: 20px;
-            font-size: 1.5em;
-            border-bottom: 2px solid #3498db;
-            padding-bottom: 10px;
-        }
-        .stats-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-            margin-bottom: 30px;
-        }
-        .stat-card {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 20px;
-            border-radius: 10px;
-            text-align: center;
-        }
-        .stat-value {
-            font-size: 2em;
-            font-weight: bold;
-            margin-bottom: 5px;
-        }
-        .stat-label {
-            font-size: 0.9em;
-            opacity: 0.9;
-        }
-        .controls {
-            display: flex;
-            gap: 15px;
-            margin-bottom: 20px;
-            flex-wrap: wrap;
-        }
-        .btn {
-            background: linear-gradient(135deg, #3498db, #2980b9);
-            color: white;
-            border: none;
-            padding: 12px 24px;
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 14px;
-            font-weight: 600;
-            transition: all 0.3s ease;
-        }
-        .btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(52, 152, 219, 0.4);
-        }
-        .btn-success { background: linear-gradient(135deg, #27ae60, #229954); }
-        .btn-warning { background: linear-gradient(135deg, #f39c12, #e67e22); }
-        .btn-danger { background: linear-gradient(135deg, #e74c3c, #c0392b); }
-        .btn:disabled {
-            opacity: 0.6;
-            cursor: not-allowed;
-            transform: none;
-        }
-        .table-container {
-            max-height: 400px;
-            overflow-y: auto;
-            border-radius: 10px;
-            border: 1px solid #ddd;
-        }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-        th, td {
-            padding: 12px;
-            text-align: left;
-            border-bottom: 1px solid #eee;
-        }
-        th {
-            background: #f8f9fa;
-            font-weight: 600;
-            position: sticky;
-            top: 0;
-        }
-        tr:hover {
-            background: #f8f9fa;
-        }
-        .status-active { color: #27ae60; font-weight: bold; }
-        .status-completed { color: #3498db; font-weight: bold; }
-        .status-error { color: #e74c3c; font-weight: bold; }
-        .pnl-positive { color: #27ae60; font-weight: bold; }
-        .pnl-negative { color: #e74c3c; font-weight: bold; }
-        .logs-container {
-            max-height: 300px;
-            overflow-y: auto;
-            background: #2c3e50;
-            color: #ecf0f1;
-            padding: 15px;
-            border-radius: 10px;
-            font-family: 'Courier New', monospace;
-            font-size: 12px;
-        }
-        .log-entry {
-            margin-bottom: 8px;
-            padding: 5px;
-            border-radius: 3px;
-        }
-        .log-info { background: rgba(52, 152, 219, 0.2); }
-        .log-success { background: rgba(39, 174, 96, 0.2); }
-        .log-warning { background: rgba(243, 156, 18, 0.2); }
-        .log-error { background: rgba(231, 76, 60, 0.2); }
-        .loading {
-            text-align: center;
-            padding: 20px;
-            color: #7f8c8d;
-        }
-        .error {
-            color: #e74c3c;
-            background: #fdf2f2;
-            padding: 10px;
-            border-radius: 5px;
-            margin: 10px 0;
-        }
-        .success {
-            color: #27ae60;
-            background: #f0f9f0;
-            padding: 10px;
-            border-radius: 5px;
-            margin: 10px 0;
-        }
-        .refresh-indicator {
-            display: inline-block;
-            width: 12px;
-            height: 12px;
-            background: #27ae60;
-            border-radius: 50%;
-            margin-right: 8px;
-            animation: pulse 2s infinite;
-        }
-        @keyframes pulse {
-            0% { opacity: 1; }
-            50% { opacity: 0.5; }
-            100% { opacity: 1; }
-        }
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #1a1a1a; color: #fff; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .header { text-align: center; margin-bottom: 30px; }
+        .header h1 { color: #00ff88; margin: 0; }
+        .header p { color: #888; margin: 10px 0; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 30px; }
+        .stat-card { background: #2a2a2a; padding: 20px; border-radius: 8px; border-left: 4px solid #00ff88; }
+        .stat-card h3 { margin: 0 0 10px 0; color: #00ff88; }
+        .stat-card .value { font-size: 24px; font-weight: bold; color: #fff; }
+        .actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-bottom: 30px; }
+        .action-card { background: #2a2a2a; padding: 20px; border-radius: 8px; border: 1px solid #444; }
+        .action-card h3 { margin: 0 0 15px 0; color: #00ff88; }
+        .btn { background: #00ff88; color: #000; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-weight: bold; margin: 5px; }
+        .btn:hover { background: #00cc6a; }
+        .btn.danger { background: #ff4444; color: #fff; }
+        .btn.danger:hover { background: #cc3333; }
+        .logs { background: #1a1a1a; border: 1px solid #444; border-radius: 8px; padding: 20px; max-height: 400px; overflow-y: auto; }
+        .log-entry { margin: 5px 0; padding: 5px; border-radius: 4px; }
+        .log-info { background: #2a2a2a; }
+        .log-success { background: #1a4a1a; }
+        .log-error { background: #4a1a1a; }
+        .status { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; }
+        .status.healthy { background: #1a4a1a; color: #00ff88; }
+        .status.error { background: #4a1a1a; color: #ff4444; }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
             <h1>🚀 Jack of all Scans - Backend Dashboard</h1>
-            <p>Real-time monitoring, management, and debugging</p>
-            <div class="refresh-indicator"></div>
-            <span>Auto-refreshing every 5 seconds</span>
+            <p>Deterministic PnL Calculation System - Race-safe & Drift-free</p>
+            <div class="status healthy">SYSTEM HEALTHY</div>
         </div>
-
-        <div class="stats-grid" id="statsGrid">
-            <div class="loading">Loading statistics...</div>
-        </div>
-
-        <div class="dashboard-grid">
-            <div class="card">
-                <h2>📊 System Controls</h2>
-                <div class="controls">
-                    <button class="btn" onclick="refreshAll()">🔄 Refresh All Calls</button>
-                    <button class="btn btn-success" onclick="recalculateAll()">🧮 Recalculate All PnL</button>
-                    <button class="btn btn-warning" onclick="fixErrors()">🔧 Fix Errors</button>
-                    <button class="btn btn-danger" onclick="clearLogs()">🗑️ Clear Logs</button>
-                </div>
-                <div id="controlStatus"></div>
+        
+        <div class="stats">
+            <div class="stat-card">
+                <h3>Total Calls</h3>
+                <div class="value" id="totalCalls">Loading...</div>
             </div>
-
-            <div class="card">
-                <h2>📈 Recent Calls</h2>
-                <div class="table-container">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Token</th>
-                                <th>User</th>
-                                <th>PnL</th>
-                                <th>Score</th>
-                                <th>Status</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody id="callsTable">
-                            <tr><td colspan="6" class="loading">Loading calls...</td></tr>
-                        </tbody>
-                    </table>
-                </div>
+            <div class="stat-card">
+                <h3>Active Calls</h3>
+                <div class="value" id="activeCalls">Loading...</div>
+            </div>
+            <div class="stat-card">
+                <h3>Total Users</h3>
+                <div class="value" id="totalUsers">Loading...</div>
+            </div>
+            <div class="stat-card">
+                <h3>Avg PnL</h3>
+                <div class="value" id="avgPnL">Loading...</div>
             </div>
         </div>
-
-        <div class="card">
-            <h2>📋 Real-time Logs</h2>
-            <div class="controls">
-                <button class="btn" onclick="filterLogs('all')">All</button>
-                <button class="btn" onclick="filterLogs('info')">Info</button>
-                <button class="btn" onclick="filterLogs('success')">Success</button>
-                <button class="btn" onclick="filterLogs('warning')">Warning</button>
-                <button class="btn" onclick="filterLogs('error')">Error</button>
+        
+        <div class="actions">
+            <div class="action-card">
+                <h3>🔄 Refresh Operations</h3>
+                <button class="btn" onclick="refreshAll()">Refresh All Tokens</button>
+                <button class="btn" onclick="recalculateAll()">Recalculate All PnL</button>
+                <button class="btn" onclick="fixErrors()">Fix Anomalies</button>
             </div>
-            <div class="logs-container" id="logsContainer">
-                <div class="loading">Loading logs...</div>
+            <div class="action-card">
+                <h3>📊 Data Management</h3>
+                <button class="btn" onclick="loadStats()">Load Stats</button>
+                <button class="btn" onclick="loadCalls()">Load Calls</button>
+                <button class="btn" onclick="loadLogs()">Load Logs</button>
             </div>
+            <div class="action-card">
+                <h3>🔧 System</h3>
+                <button class="btn" onclick="checkHealth()">Health Check</button>
+                <button class="btn danger" onclick="clearLogs()">Clear Logs</button>
+            </div>
+        </div>
+        
+        <div class="logs">
+            <h3>📋 System Logs</h3>
+            <div id="logContainer">Loading logs...</div>
         </div>
     </div>
 
     <script>
-        let autoRefreshInterval;
-        let currentLogFilter = 'all';
-
-        // Initialize dashboard
-        document.addEventListener('DOMContentLoaded', function() {
-            loadDashboard();
-            autoRefreshInterval = setInterval(loadDashboard, 5000);
-        });
-
-        async function loadDashboard() {
-            try {
-                await Promise.all([
-                    loadStats(),
-                    loadCalls(),
-                    loadLogs()
-                ]);
-  } catch (error) {
-                console.error('Error loading dashboard:', error);
-            }
-        }
-
+        const API_BASE = window.location.origin;
+        
         async function loadStats() {
             try {
-                const response = await fetch('/api/dashboard/stats');
-                const result = await response.json();
+                const response = await fetch(API_BASE + '/api/dashboard/stats');
+                const data = await response.json();
                 
-                if (result.success) {
-                    const stats = result.data;
-                    document.getElementById('statsGrid').innerHTML = \`
-                        <div class="stat-card">
-                            <div class="stat-value">\${stats.totalCalls}</div>
-                            <div class="stat-label">Total Calls</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-value">\${stats.activeCalls}</div>
-                            <div class="stat-label">Active Calls</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-value">\${stats.totalUsers}</div>
-                            <div class="stat-label">Total Users</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-value">\${stats.averagePnl.toFixed(1)}%</div>
-                            <div class="stat-label">Avg PnL</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-value">\${stats.bestCall.toFixed(1)}%</div>
-                            <div class="stat-label">Best Call</div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-value">\${Math.round(stats.systemUptime / 3600)}h</div>
-                            <div class="stat-label">Uptime</div>
-                        </div>
-                    \`;
+                if (data.success) {
+                    document.getElementById('totalCalls').textContent = data.data.totalCalls;
+                    document.getElementById('activeCalls').textContent = data.data.activeCalls;
+                    document.getElementById('totalUsers').textContent = data.data.totalUsers;
+                    document.getElementById('avgPnL').textContent = data.data.avgPnL + '%';
                 }
-  } catch (error) {
+            } catch (error) {
                 console.error('Error loading stats:', error);
             }
         }
-
-        async function loadCalls() {
+        
+        async function refreshAll() {
             try {
-                const response = await fetch('/api/dashboard/calls');
-                const result = await response.json();
-                
-                if (result.success) {
-                    const calls = result.data.slice(0, 20); // Show only first 20
-                    const tbody = document.getElementById('callsTable');
-                    
-                    if (calls.length === 0) {
-                        tbody.innerHTML = '<tr><td colspan="6" class="loading">No calls found</td></tr>';
-                        return;
-                    }
-                    
-                    tbody.innerHTML = calls.map(call => \`
-                        <tr>
-                            <td>
-                                <strong>\${call.tokenSymbol}</strong><br>
-                                <small>\${call.contractAddress.substring(0, 8)}...</small>
-                            </td>
-                            <td>\${call.username || 'Unknown'}</td>
-                            <td class="\${call.pnlPercent >= 0 ? 'pnl-positive' : 'pnl-negative'}">
-                                \${call.pnlPercent.toFixed(2)}%
-                            </td>
-                            <td>\${call.score.toFixed(2)}</td>
-                            <td class="status-\${call.status}">\${call.status}</td>
-                            <td>
-                                <button class="btn" onclick="refreshCall('\${call.contractAddress}')" style="padding: 5px 10px; font-size: 12px;">
-                                    🔄
-                                </button>
-                            </td>
-                        </tr>
-                    \`).join('');
-                }
-  } catch (error) {
-                console.error('Error loading calls:', error);
+                const response = await fetch(API_BASE + '/api/dashboard/refresh-all', { method: 'POST' });
+                const data = await response.json();
+                alert('Refresh All: ' + (data.success ? 'Success' : 'Failed'));
+                loadStats();
+            } catch (error) {
+                console.error('Error refreshing all:', error);
+                alert('Error refreshing all tokens');
             }
         }
-
+        
+        async function recalculateAll() {
+            try {
+                const response = await fetch(API_BASE + '/api/dashboard/recalculate-all', { method: 'POST' });
+                const data = await response.json();
+                alert('Recalculate All: ' + (data.success ? 'Success' : 'Failed'));
+                loadStats();
+            } catch (error) {
+                console.error('Error recalculating all:', error);
+                alert('Error recalculating all PnL');
+            }
+        }
+        
+        async function fixErrors() {
+            try {
+                const response = await fetch(API_BASE + '/api/dashboard/fix-errors', { method: 'POST' });
+                const data = await response.json();
+                alert('Fix Errors: ' + (data.success ? 'Success' : 'Failed'));
+                loadStats();
+            } catch (error) {
+                console.error('Error fixing errors:', error);
+                alert('Error fixing anomalies');
+            }
+        }
+        
+        async function loadCalls() {
+            try {
+                const response = await fetch(API_BASE + '/api/dashboard/calls');
+                const data = await response.json();
+                console.log('Calls data:', data);
+                alert('Calls loaded. Check console for details.');
+            } catch (error) {
+                console.error('Error loading calls:', error);
+                alert('Error loading calls');
+            }
+        }
+        
         async function loadLogs() {
             try {
-                const response = await fetch(\`/api/dashboard/logs?level=\${currentLogFilter === 'all' ? '' : currentLogFilter}&limit=50\`);
-                const result = await response.json();
+                const response = await fetch(API_BASE + '/api/dashboard/logs');
+                const data = await response.json();
                 
-                if (result.success) {
-                    const logs = result.data;
-                    const container = document.getElementById('logsContainer');
-                    
-                    if (logs.length === 0) {
-                        container.innerHTML = '<div class="loading">No logs found</div>';
-                        return;
-                    }
-                    
-                    container.innerHTML = logs.map(log => \`
-                        <div class="log-entry log-\${log.level}">
-                            <strong>[\${new Date(log.timestamp).toLocaleTimeString()}] \${log.level.toUpperCase()}:</strong>
-                            \${log.message}
-                            \${log.data ? \`<br><pre style="margin-top: 5px; font-size: 10px;">\${log.data}</pre>\` : ''}
-                        </div>
-                    \`).join('');
-                    
-                    // Auto-scroll to top
-                    container.scrollTop = 0;
+                if (data.success) {
+                    const logContainer = document.getElementById('logContainer');
+                    logContainer.innerHTML = data.data.map(log => 
+                        '<div class="log-entry log-' + log.type + '">' +
+                        '[' + log.timestamp + '] ' + log.type.toUpperCase() + ': ' + log.message +
+                        '</div>'
+                    ).join('');
                 }
             } catch (error) {
                 console.error('Error loading logs:', error);
             }
         }
-
-        function filterLogs(level) {
-            currentLogFilter = level;
-            loadLogs();
-        }
-
-        async function refreshCall(contractAddress) {
+        
+        async function checkHealth() {
             try {
-                showControlStatus('Refreshing call...', 'info');
-                const response = await fetch(\`/api/dashboard/refresh/\${contractAddress}\`, { method: 'POST' });
-                const result = await response.json();
-                
-                if (result.success) {
-                    showControlStatus(\`Call \${contractAddress} refreshed successfully\`, 'success');
-    } else {
-                    showControlStatus(\`Failed to refresh call: \${result.error}\`, 'error');
-    }
-    
-                // Refresh dashboard after a short delay
-                setTimeout(loadDashboard, 1000);
-  } catch (error) {
-                showControlStatus(\`Error refreshing call: \${error.message}\`, 'error');
-            }
-        }
-
-        async function refreshAll() {
-            try {
-                showControlStatus('Refreshing all calls...', 'info');
-                const response = await fetch('/api/dashboard/refresh-all', { method: 'POST' });
-                const result = await response.json();
-                
-                if (result.success) {
-                    showControlStatus(\`All calls refreshed successfully\`, 'success');
-                } else {
-                    showControlStatus(\`Failed to refresh calls: \${result.error}\`, 'error');
-                }
-                
-                setTimeout(loadDashboard, 2000);
-  } catch (error) {
-                showControlStatus(\`Error refreshing calls: \${error.message}\`, 'error');
-            }
-        }
-
-        async function recalculateAll() {
-            try {
-                showControlStatus('Recalculating all PnL...', 'info');
-                const response = await fetch('/api/dashboard/recalculate-all', { method: 'POST' });
-                const result = await response.json();
-                
-                if (result.success) {
-                    const successful = result.data.filter(r => r.success).length;
-                    const total = result.data.length;
-                    showControlStatus(\`Recalculation completed: \${successful}/\${total} successful\`, 'success');
-    } else {
-                    showControlStatus(\`Failed to recalculate: \${result.error}\`, 'error');
-    }
-                
-                setTimeout(loadDashboard, 2000);
-  } catch (error) {
-                showControlStatus(\`Error recalculating: \${error.message}\`, 'error');
-            }
-        }
-
-        async function fixErrors() {
-            try {
-                showControlStatus('Fixing errors...', 'info');
-                const response = await fetch('/api/dashboard/fix-errors', { method: 'POST' });
-                const result = await response.json();
-                
-                if (result.success) {
-                    showControlStatus(\`Fixed \${result.data.length} calls\`, 'success');
-                } else {
-                    showControlStatus(\`Failed to fix errors: \${result.error}\`, 'error');
-                }
-                
-                setTimeout(loadDashboard, 1000);
+                const response = await fetch(API_BASE + '/api/health');
+                const data = await response.json();
+                alert('Health Check: ' + data.status);
             } catch (error) {
-                showControlStatus(\`Error fixing: \${error.message}\`, 'error');
+                console.error('Error checking health:', error);
+                alert('Error checking health');
             }
         }
-
+        
         function clearLogs() {
             if (confirm('Are you sure you want to clear all logs?')) {
-                document.getElementById('logsContainer').innerHTML = '<div class="loading">Logs cleared</div>';
-                // Note: This only clears the display, not the server logs
+                document.getElementById('logContainer').innerHTML = 'Logs cleared.';
             }
         }
-
-        function showControlStatus(message, type) {
-            const statusDiv = document.getElementById('controlStatus');
-            statusDiv.innerHTML = \`<div class="\${type}">\${message}</div>\`;
-            
-            // Clear status after 5 seconds
-            setTimeout(() => {
-                statusDiv.innerHTML = '';
-            }, 5000);
-        }
-
-        // Cleanup on page unload
-        window.addEventListener('beforeunload', function() {
-            if (autoRefreshInterval) {
-                clearInterval(autoRefreshInterval);
-            }
-        });
+        
+        // Load initial data
+        loadStats();
+        loadLogs();
+        
+        // Auto-refresh every 30 seconds
+        setInterval(() => {
+            loadStats();
+            loadLogs();
+        }, 30000);
     </script>
 </body>
 </html>
   `);
 });
 
-// Existing API endpoints (simplified versions)
+// Calls endpoint for frontend
 app.get('/api/calls', async (req, res) => {
   try {
-    addLog('info', 'Fetching active calls');
+    addLog('info', 'Fetching calls for frontend');
     
-    // Use cached data if available, otherwise fetch from database
-    let calls = cachedCalls.length > 0 ? cachedCalls : await db.getAllActiveCalls();
+    // Always fetch fresh data from Firebase
+    const calls = await db.getAllActiveCalls();
     
-    addLog('info', `Processing ${calls.length} calls`);
-    
-    const transformedCalls = await Promise.all(calls.map(async (call) => {
-      let displayName = 'Unknown User';
-      if (call.username) {
-        displayName = `@${call.username}`;
-      } else if (call.firstName) {
-        displayName = call.firstName;
-      }
-      
-      // Get token image from token record if call doesn't have it
-      let tokenImage = call.image || null;
-      if (!tokenImage) {
-        try {
-          const token = await db.findTokenByContractAddress(call.contractAddress);
-          tokenImage = token?.image || null;
-        } catch (error) {
-          addLog('info', 'Could not fetch token image:', error.message);
-        }
-      }
-
-      // Check if user has linked Twitter account
-      let twitterInfo = null;
-      let isLinked = false;
-      try {
-        const linkingCodesRef = ref(database, 'linkingCodes');
-        const linkingSnapshot = await get(linkingCodesRef);
-        const linkingCodes = linkingSnapshot.exists() ? linkingSnapshot.val() : {};
-        
-        // Find linking data for this Telegram username
-        for (const [code, data] of Object.entries(linkingCodes)) {
-          if (data.telegramUsername === call.username && data.isUsed === true) {
-            twitterInfo = {
-              twitterId: data.twitterId,
-              twitterUsername: data.twitterUsername,
-              twitterName: data.twitterName,
-              twitterProfilePic: data.profilePictureUrl
-            };
-            isLinked = true;
-            break;
-          }
-        }
-      } catch (error) {
-        addLog('info', 'Could not check Twitter linking:', error.message);
-      }
-
+    // Add Twitter linking information for each call
+    const callsWithTwitter = calls.map(call => {
+      const twitterInfo = call.user?.twitterInfo || {};
       return {
-        id: call.id,
-        contractAddress: call.contractAddress,
-        createdAt: call.createdAt,
-        updatedAt: call.updatedAt,
-        token: {
-          name: call.tokenName,
-          symbol: call.tokenSymbol,
-          contractAddress: call.contractAddress,
-          image: tokenImage
-        },
+        ...call,
         user: {
-          id: call.userId,
-          username: call.username,
-          firstName: call.firstName,
-          lastName: call.lastName,
-          displayName,
-          isLinked,
-          twitterInfo
-        },
-        pnlPercent: call.pnlPercent || 0,
-        score: call.score || 0,
-        entryMarketCap: call.entryMarketCap || 0,
-        currentMarketCap: call.currentMarketCap || 0,
-        status: call.status || 'active'
+          ...call.user,
+          username: call.user?.username || twitterInfo.twitterUsername,
+          twitterId: twitterInfo.twitterId,
+          profilePictureUrl: twitterInfo.profilePictureUrl
+        }
       };
-    }));
-
-    // Sort by PnL performance (highest first), then by creation date
-    transformedCalls.sort((a, b) => {
-      if (b.pnlPercent !== a.pnlPercent) {
-        return b.pnlPercent - a.pnlPercent;
-      }
-      return new Date(b.createdAt) - new Date(a.createdAt);
     });
-
-    addLog('success', `Fetched ${transformedCalls.length} active calls`);
-    res.json({ success: true, data: transformedCalls });
+    
+    addLog('success', `Fetched ${callsWithTwitter.length} calls with Twitter data`);
+    res.json({ success: true, data: callsWithTwitter });
   } catch (error) {
-    addLog('error', 'Failed to fetch active calls', error.message);
+    addLog('error', 'Failed to fetch calls for frontend', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
+// User profile endpoint
 app.get('/api/user-profile/:twitterId', async (req, res) => {
   try {
     const { twitterId } = req.params;
-    addLog('info', `Fetching profile for Twitter ID: ${twitterId}`);
+    addLog('info', `Fetching user profile for Twitter ID: ${twitterId}`);
     
-    // Get linking codes to find Telegram username
-    const linkingCodesRef = ref(database, 'linkingCodes');
-    const linkingSnapshot = await get(linkingCodesRef);
-    const linkingCodes = linkingSnapshot.exists() ? linkingSnapshot.val() : {};
+    const user = await db.getUserByTwitterId(twitterId);
     
-    // Find the linking data for this Twitter ID
-    let linkingData = null;
-    for (const [code, data] of Object.entries(linkingCodes)) {
-      if (data.twitterId === twitterId && data.isUsed === true) {
-        linkingData = data;
-        break;
-      }
+    if (!user) {
+      return res.status(404).json({ success: false, error: 'User not found' });
     }
     
-    if (!linkingData) {
-      addLog('warning', `No linked Telegram account found for Twitter ID: ${twitterId}`);
-      return res.json({ success: true, data: [] });
-    }
+    // Get user's calls
+    const calls = await db.getCallsByUser(twitterId);
     
-    // Get all calls and filter by Telegram username
-    const calls = await db.getAllActiveCalls();
-    const userCalls = calls.filter(call => call.username === linkingData.telegramUsername);
-    
-    // Calculate profile statistics
-    const totalCalls = userCalls.length;
-    const successfulCalls = userCalls.filter(call => (call.pnlPercent || 0) > 0).length;
-    const winRate = totalCalls > 0 ? (successfulCalls / totalCalls) * 100 : 0;
-    const totalScore = userCalls.reduce((sum, call) => sum + (parseFloat(call.score) || 0), 0);
-    const bestCall = Math.max(...userCalls.map(call => call.pnlPercent || 0), 0);
-    
-    // Get recent calls for display
-    const recentCalls = await Promise.all(
-      userCalls
-        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-        .slice(0, 10)
-        .map(async (call) => {
-          // Get token image from token record if call doesn't have it
-          let tokenImage = call.image || null;
-          if (!tokenImage) {
-            try {
-              const token = await db.findTokenByContractAddress(call.contractAddress);
-              tokenImage = token?.image || null;
-      } catch (error) {
-              addLog('info', 'Could not fetch token image for profile:', error.message);
-            }
-          }
-
-          return {
-            id: call.id,
-            contractAddress: call.contractAddress,
-            tokenName: call.tokenName,
-            tokenSymbol: call.tokenSymbol,
-            image: tokenImage,
-            pnlPercent: call.pnlPercent || 0,
-            score: call.score || 0,
-            createdAt: call.createdAt,
-            entryMarketCap: call.entryMarketCap,
-            currentMarketCap: call.currentMarketCap
-          };
-        })
-    );
-    
-    const profileData = {
-      twitterId: linkingData.twitterId,
-      twitterUsername: linkingData.twitterUsername,
-      telegramUsername: linkingData.telegramUsername,
-      totalCalls,
-      winRate: Math.round(winRate * 10) / 10,
-      totalScore: Math.round(totalScore * 10) / 10,
-      bestCall: Math.round(bestCall * 10) / 10,
-      recentCalls
+    const profile = {
+      ...user,
+      calls: calls,
+      totalCalls: calls.length,
+      avgPnL: calls.length > 0 ? calls.reduce((sum, call) => sum + (parseFloat(call.pnlPercent) || 0), 0) / calls.length : 0,
+      bestCall: calls.length > 0 ? Math.max(...calls.map(call => parseFloat(call.pnlPercent) || 0)) : 0
     };
     
-    addLog('success', `Profile data calculated for @${linkingData.twitterUsername}:`, profileData);
-    res.json({ success: true, data: profileData });
-      } catch (error) {
-    addLog('error', 'Failed to fetch user profile', error.message);
+    addLog('success', `User profile fetched for ${twitterId}`);
+    res.json({ success: true, data: profile });
+  } catch (error) {
+    addLog('error', `Failed to fetch user profile for ${req.params.twitterId}`, error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Missing API endpoints
+// Leaderboard endpoint
 app.get('/api/leaderboard', async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit) || 10;
-    addLog('info', `Fetching leaderboard with limit: ${limit}`);
+    addLog('info', 'Fetching leaderboard');
     
-    const calls = await db.getAllActiveCalls();
+    const users = await db.getAllUsers();
     
-    // Group calls by user and calculate stats
-    const userStats = {};
-    
-    calls.forEach(call => {
-      const userId = call.userId || call.username || 'unknown';
-      if (!userStats[userId]) {
-        userStats[userId] = {
-          telegramId: userId,
-          username: call.username || 'Unknown',
-          totalCalls: 0,
-          successfulCalls: 0,
-          totalScore: 0,
-          bestCall: 0,
-          calls: []
-        };
-      }
+    // Calculate leaderboard data
+    const leaderboard = users.map(user => {
+      const totalCalls = user.totalCalls || 0;
+      const wins = user.wins || 0;
+      const winRate = totalCalls > 0 ? (wins / totalCalls) * 100 : 0;
       
-      userStats[userId].totalCalls++;
-      userStats[userId].totalScore += parseFloat(call.score || 0);
-      userStats[userId].bestCall = Math.max(userStats[userId].bestCall, call.pnlPercent || 0);
-      userStats[userId].calls.push(call);
-      
-      if ((call.pnlPercent || 0) > 0) {
-        userStats[userId].successfulCalls++;
-      }
-    });
+      return {
+        username: user.username,
+        totalCalls: totalCalls,
+        totalScore: user.totalScore || 0,
+        winRate: parseFloat(winRate.toFixed(1)),
+        twitterId: user.twitterId,
+        profilePictureUrl: user.profilePictureUrl
+      };
+    }).sort((a, b) => b.totalScore - a.totalScore);
     
-    // Calculate win rate and create leaderboard
-    const leaderboard = Object.values(userStats)
-      .map(user => ({
-        ...user,
-        winRate: user.totalCalls > 0 ? (user.successfulCalls / user.totalCalls) * 100 : 0,
-        displayName: user.username,
-        isLinked: false, // You can add linking logic here
-        twitterUsername: null,
-        twitterProfilePic: null
-      }))
-      .sort((a, b) => b.totalScore - a.totalScore)
-      .slice(0, limit)
-      .map((user, index) => ({
-        ...user,
-        rank: index + 1
-      }));
-    
-    addLog('success', `Leaderboard generated with ${leaderboard.length} entries`);
+    addLog('success', `Leaderboard calculated with ${leaderboard.length} users`);
     res.json({ success: true, data: leaderboard });
   } catch (error) {
     addLog('error', 'Failed to fetch leaderboard', error.message);
@@ -1283,37 +810,37 @@ app.get('/api/leaderboard', async (req, res) => {
   }
 });
 
+// Generate linking code endpoint
 app.post('/api/generate-linking-code', async (req, res) => {
   try {
     const { twitterId, twitterUsername, twitterName, profilePictureUrl } = req.body;
-    addLog('info', `Generating linking code for Twitter user: ${twitterUsername}`);
     
-    // Generate a random 6-digit code
+    if (!twitterId || !twitterUsername) {
+      return res.status(400).json({ success: false, error: 'Twitter ID and username are required' });
+    }
+    
+    // Generate a 6-digit linking code
     const linkingCode = Math.floor(100000 + Math.random() * 900000).toString();
     
-    // Store the linking code in Firebase
-    const linkingCodesRef = ref(database, 'linkingCodes');
-    const newCodeRef = push(linkingCodesRef);
-    
+    // Store the linking code with expiration (24 hours)
     const linkingData = {
-      code: linkingCode,
       twitterId,
       twitterUsername,
       twitterName,
       profilePictureUrl,
-      isUsed: false,
-      createdAt: new Date().toISOString(),
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() // 24 hours
+      linkingCode,
+      expiresAt: Date.now() + (24 * 60 * 60 * 1000), // 24 hours
+      createdAt: new Date().toISOString()
     };
     
-    await set(newCodeRef, linkingData);
+    await db.set(`linkingCodes/${linkingCode}`, linkingData);
     
-    addLog('success', `Linking code generated: ${linkingCode} for @${twitterUsername}`);
+    addLog('success', `Linking code generated for ${twitterUsername}: ${linkingCode}`);
     res.json({ 
       success: true, 
-      data: {
-        linkingCode,
-        expiresIn: 24 * 60 * 60 * 1000 // 24 hours in milliseconds
+      data: { 
+        linkingCode, 
+        expiresIn: 24 * 60 * 60 * 1000 
       } 
     });
   } catch (error) {
@@ -1322,27 +849,25 @@ app.post('/api/generate-linking-code', async (req, res) => {
   }
 });
 
-// WebSocket connection handling
-io.on('connection', (socket) => {
-  addLog('info', `Client connected: ${socket.id}`);
-  
-  // Send current data to newly connected client
-  socket.emit('calls_updated', cachedCalls);
-  
-  socket.on('disconnect', () => {
-    addLog('info', `Client disconnected: ${socket.id}`);
+// Initialize real-time listeners (disabled for Vercel)
+if (process.env.NODE_ENV !== 'production') {
+  setupRealtimeListeners();
+  addLog('info', 'Real-time listeners initialized');
+} else {
+  addLog('info', 'Real-time listeners disabled for Vercel deployment');
+}
+
+// Auto-recalculate scores on startup
+autoRecalculateScores();
+
+// Start server (only if not in production for Vercel)
+if (process.env.NODE_ENV !== 'production') {
+  server.listen(PORT, () => {
+    addLog('success', `Server running on port ${PORT}`);
+    console.log(`🚀 Jack of all Scans Backend running on port ${PORT}`);
   });
-});
+} else {
+  addLog('info', 'Server initialized for Vercel deployment');
+}
 
-// Initialize real-time listeners (disabled for Vercel deployment)
-// setupRealtimeListeners();
-
-// Start server
-server.listen(PORT, () => {
-  addLog('success', `🚀 Jack of all Scans Backend Dashboard running on port ${PORT}`);
-  addLog('info', `Dashboard available at: http://localhost:${PORT}`);
-  addLog('info', `WebSocket server running for real-time updates`);
-  console.log(`🚀 Jack of all Scans Backend Dashboard running on port ${PORT}`);
-  console.log(`📊 Dashboard available at: http://localhost:${PORT}`);
-  console.log(`🔌 WebSocket server running for real-time updates`);
-});
+module.exports = app;
