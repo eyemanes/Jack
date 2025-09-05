@@ -148,8 +148,9 @@ app.get('/api/dashboard/stats', async (req, res) => {
   try {
     addLog('info', 'Fetching dashboard stats');
     
-    // Use cached data if available, otherwise fetch from database
-    const calls = cachedCalls.length > 0 ? cachedCalls : await db.getAllActiveCalls();
+    // Always fetch fresh data from database (don't rely on cache for Vercel)
+    const calls = await db.getAllActiveCalls();
+    addLog('info', `Fetched ${calls.length} calls from database`);
     
     // Get tokens count from Firebase
     let tokensCount = 0;
@@ -157,6 +158,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
       const tokensRef = ref(database, 'tokens');
       const tokensSnapshot = await get(tokensRef);
       tokensCount = tokensSnapshot.exists() ? tokensSnapshot.size : 0;
+      addLog('info', `Fetched ${tokensCount} tokens from database`);
     } catch (error) {
       addLog('warning', 'Could not fetch tokens count:', error.message);
     }
@@ -188,6 +190,8 @@ app.get('/api/dashboard/calls', async (req, res) => {
     addLog('info', 'Fetching dashboard calls');
     
     const calls = await db.getAllActiveCalls();
+    addLog('info', `Fetched ${calls.length} calls from database`);
+    
     const transformedCalls = calls.map(call => ({
       id: call.id,
       contractAddress: call.contractAddress,
@@ -272,7 +276,7 @@ app.post('/api/dashboard/refresh-all', async (req, res) => {
   try {
     addLog('info', 'Starting bulk refresh of all calls');
     
-    const calls = cachedCalls.length > 0 ? cachedCalls : await db.getAllActiveCalls();
+    const calls = await db.getAllActiveCalls();
     const results = [];
     
     for (const call of calls) {
@@ -330,7 +334,7 @@ app.post('/api/refresh-all', async (req, res) => {
   try {
     addLog('info', 'Starting bulk refresh of all calls (frontend endpoint)');
     
-    const calls = cachedCalls.length > 0 ? cachedCalls : await db.getAllActiveCalls();
+    const calls = await db.getAllActiveCalls();
     const results = [];
     
     for (const call of calls) {
@@ -1208,8 +1212,8 @@ io.on('connection', (socket) => {
   });
 });
 
-// Initialize real-time listeners
-setupRealtimeListeners();
+// Initialize real-time listeners (disabled for Vercel deployment)
+// setupRealtimeListeners();
 
 // Start server
 server.listen(PORT, () => {
