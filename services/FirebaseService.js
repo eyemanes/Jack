@@ -1,4 +1,4 @@
-const { ref, get, set, push, update, remove, query, orderByChild, orderByKey, limitToLast, equalTo } = require('firebase/database');
+const { ref, get, set, push, update, remove, query, orderByChild, orderByKey, limitToLast, equalTo, runTransaction } = require('firebase/database');
 const { database } = require('../config/firebase');
 
 class FirebaseService {
@@ -401,6 +401,63 @@ class FirebaseService {
     } catch (error) {
       console.error('Error getting average PnL:', error);
       return 0;
+    }
+  }
+
+  // Generic Firebase operations
+  async set(path, data) {
+    try {
+      const refPath = ref(this.db, path);
+      await set(refPath, data);
+      return true;
+    } catch (error) {
+      console.error('Error setting data:', error);
+      return false;
+    }
+  }
+
+  async get(path) {
+    try {
+      const refPath = ref(this.db, path);
+      const snapshot = await get(refPath);
+      return snapshot.exists() ? snapshot.val() : null;
+    } catch (error) {
+      console.error('Error getting data:', error);
+      return null;
+    }
+  }
+
+  async update(path, data) {
+    try {
+      const refPath = ref(this.db, path);
+      await update(refPath, data);
+      return true;
+    } catch (error) {
+      console.error('Error updating data:', error);
+      return false;
+    }
+  }
+
+  async remove(path) {
+    try {
+      const refPath = ref(this.db, path);
+      await remove(refPath);
+      return true;
+    } catch (error) {
+      console.error('Error removing data:', error);
+      return false;
+    }
+  }
+
+  // Transaction support
+  async transaction(path, updateFunction) {
+    try {
+      const refPath = ref(this.db, path);
+      const result = await runTransaction(refPath, updateFunction);
+      return result;
+    } catch (error) {
+      console.error('Error in transaction:', error);
+      return null;
     }
   }
 }
