@@ -448,9 +448,9 @@ app.post('/api/dashboard/fix-errors', async (req, res) => {
     const calls = await db.getAllActiveCalls();
     const fixedCalls = [];
     
-    // Import the PnlCalculationService for the shouldResetMaxPnl method
-    const PnlCalculationService = require('./services/PnlCalculationService');
-    const pnlCalculationService = new PnlCalculationService();
+    // Import the ImprovedPnlCalculationService for the shouldResetMaxPnl method
+    const ImprovedPnlCalculationService = require('./services/ImprovedPnlCalculationService');
+    const pnlCalculationService = new ImprovedPnlCalculationService();
     
     for (const call of calls) {
       try {

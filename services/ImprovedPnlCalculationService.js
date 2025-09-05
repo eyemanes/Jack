@@ -450,9 +450,22 @@ class ImprovedPnlCalculationService {
    */
   async calculateAccuratePnl(call) {
     try {
+      // Validate call object first
+      if (!call || typeof call !== 'object') {
+        console.error('❌ Invalid call object in calculateAccuratePnl:', call);
+        return {
+          pnlPercent: 0,
+          pnlType: 'error',
+          reason: 'Invalid call object',
+          data: null,
+          timestamp: Date.now()
+        };
+      }
+
       const entryMarketCap = parseFloat(call.entryMarketCap) || 0;
       
       if (!entryMarketCap) {
+        console.error('❌ No valid entry market cap for call:', call.id || call.contractAddress);
         return {
           pnlPercent: 0,
           pnlType: 'error',
@@ -474,15 +487,29 @@ class ImprovedPnlCalculationService {
         // Fetch current token data
         tokenData = await solanaService.getTokenData(call.contractAddress);
         
-        if (tokenData && tokenData.marketCap && !isNaN(parseFloat(tokenData.marketCap))) {
-          currentMarketCap = parseFloat(tokenData.marketCap);
-          console.log(`✅ Fetched fresh market cap for ${call.contractAddress}: $${currentMarketCap.toLocaleString()}`);
+        // Add comprehensive validation for tokenData
+        if (tokenData && typeof tokenData === 'object' && tokenData.marketCap !== undefined && tokenData.marketCap !== null) {
+          const parsedMarketCap = parseFloat(tokenData.marketCap);
+          if (!isNaN(parsedMarketCap) && parsedMarketCap > 0) {
+            currentMarketCap = parsedMarketCap;
+            console.log(`✅ Fetched fresh market cap for ${call.contractAddress}: $${currentMarketCap.toLocaleString()}`);
+          } else {
+            console.log(`⚠️ Invalid market cap value for ${call.contractAddress}: ${tokenData.marketCap}, using stored data`);
+          }
         } else {
-          console.log(`⚠️ Invalid token data for ${call.contractAddress}, using stored data`);
+          console.log(`⚠️ Invalid token data structure for ${call.contractAddress}:`, {
+            tokenData: tokenData ? 'exists' : 'null',
+            marketCap: tokenData?.marketCap,
+            type: typeof tokenData?.marketCap,
+            isValid: tokenData && tokenData.marketCap && !isNaN(parseFloat(tokenData.marketCap))
+          });
+          console.log(`⚠️ Using stored data instead`);
         }
       } catch (error) {
-        console.log(`⚠️ Could not fetch fresh token data for ${call.contractAddress}: ${error.message}, using stored data`);
+        console.error(`❌ Error fetching fresh token data for ${call.contractAddress}:`, error.message);
+        console.log(`⚠️ Using stored data instead`);
         // Fall back to stored currentMarketCap
+        tokenData = null; // Ensure tokenData is null if API call failed
       }
 
       if (!currentMarketCap || currentMarketCap <= 0) {
@@ -503,7 +530,8 @@ class ImprovedPnlCalculationService {
           entryMarketCap,
           currentMarketCap,
           pnl,
-          tokenData: tokenData || null
+          tokenData: tokenData || null,
+          contractAddress: call.contractAddress || 'unknown'
         },
         timestamp: Date.now()
       };
@@ -516,6 +544,46 @@ class ImprovedPnlCalculationService {
         data: null,
         timestamp: Date.now()
       };
+    }
+  }
+
+  /**
+   * RESET CORRUPTED MAX PNL VALUES
+   * @param {Object} call - Call object from database
+   * @param {Object} tokenData - Current token data (optional)
+   * @returns {boolean} True if maxPnl should be reset
+   */
+  shouldResetMaxPnl(call, tokenData = null) {
+    try {
+      const maxPnl = parseFloat(call.maxPnl) || 0;
+      const entryMcap = parseFloat(call.entryMarketCap) || 0;
+      
+      if (maxPnl <= 0 || entryMcap <= 0) return false;
+      
+      // If no tokenData provided, use a simple check based on current stored data
+      if (!tokenData) {
+        const currentMcap = parseFloat(call.currentMarketCap) || 0;
+        if (currentMcap <= 0) return false;
+        
+        const maxPossiblePnl = ((currentMcap / entryMcap) - 1) * 100;
+        return maxPnl > maxPossiblePnl * 2;
+      }
+      
+      const currentMcap = parseFloat(tokenData.marketCap) || 0;
+      const athMcap = parseFloat(tokenData.ath) || 0;
+      
+      if (currentMcap <= 0) return false;
+      
+      const maxPossiblePnl = Math.max(
+        ((currentMcap / entryMcap) - 1) * 100,
+        athMcap > 0 ? ((athMcap / entryMcap) - 1) * 100 : 0
+      );
+      
+      // If maxPnl is more than 2x the maximum possible PnL, it's corrupted
+      return maxPnl > maxPossiblePnl * 2;
+    } catch (error) {
+      console.error('❌ Error in shouldResetMaxPnl:', error);
+      return false;
     }
   }
 
