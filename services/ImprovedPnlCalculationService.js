@@ -450,17 +450,48 @@ class ImprovedPnlCalculationService {
    */
   async calculateAccuratePnl(call) {
     try {
-      // For now, we'll use the basic calculation since we don't have token data
-      // In a real implementation, you would fetch current token data here
       const entryMarketCap = parseFloat(call.entryMarketCap) || 0;
-      const currentMarketCap = parseFloat(call.currentMarketCap) || 0;
       
-      if (!entryMarketCap || !currentMarketCap) {
+      if (!entryMarketCap) {
         return {
           pnlPercent: 0,
           pnlType: 'error',
-          reason: 'No valid market cap data',
+          reason: 'No valid entry market cap data',
           data: null,
+          timestamp: Date.now()
+        };
+      }
+
+      // Try to fetch current token data from Solana Tracker API
+      let currentMarketCap = parseFloat(call.currentMarketCap) || 0;
+      let tokenData = null;
+      
+      try {
+        // Import SolanaTrackerService to get current data
+        const SolanaTrackerService = require('./SolanaTrackerService');
+        const solanaService = new SolanaTrackerService();
+        
+        // Fetch current token data
+        tokenData = await solanaService.getTokenData(call.contractAddress);
+        
+        if (tokenData && tokenData.marketCap) {
+          currentMarketCap = parseFloat(tokenData.marketCap);
+        }
+      } catch (error) {
+        console.log(`⚠️ Could not fetch fresh token data for ${call.contractAddress}, using stored data`);
+        // Fall back to stored currentMarketCap
+      }
+
+      if (!currentMarketCap || currentMarketCap <= 0) {
+        return {
+          pnlPercent: 0,
+          pnlType: 'error',
+          reason: 'No valid current market cap data',
+          data: {
+            entryMarketCap,
+            currentMarketCap: 0,
+            tokenData
+          },
           timestamp: Date.now()
         };
       }
@@ -474,7 +505,8 @@ class ImprovedPnlCalculationService {
         data: {
           entryMarketCap,
           currentMarketCap,
-          pnl
+          pnl,
+          tokenData
         },
         timestamp: Date.now()
       };

@@ -4,7 +4,7 @@ const cors = require('cors');
 const path = require('path');
 const http = require('http');
 const { Server } = require('socket.io');
-const { ref, set, get, onValue } = require('firebase/database');
+const { ref, set, get, onValue, push } = require('firebase/database');
 const FirebaseService = require('./services/FirebaseService');
 const SolanaTrackerService = require('./services/SolanaTrackerService');
 const { database } = require('./config/firebase');
@@ -271,6 +271,64 @@ app.post('/api/dashboard/refresh/:contractAddress', async (req, res) => {
 app.post('/api/dashboard/refresh-all', async (req, res) => {
   try {
     addLog('info', 'Starting bulk refresh of all calls');
+    
+    const calls = cachedCalls.length > 0 ? cachedCalls : await db.getAllActiveCalls();
+    const results = [];
+    
+    for (const call of calls) {
+      try {
+        addLog('info', `Refreshing call: ${call.contractAddress}`);
+        
+        // Add 2-second delay for PnL calculation processing
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        const result = await pnlService.calculateAccuratePnl(call);
+        
+        if (result.pnlPercent !== undefined) {
+          // Update the call in the database with new PnL
+          await db.updateCall(call.id, {
+            pnlPercent: result.pnlPercent,
+            currentMarketCap: result.data?.currentMarketCap || call.currentMarketCap,
+            updatedAt: new Date().toISOString()
+          });
+          
+          results.push({
+            contractAddress: call.contractAddress,
+            success: true,
+            data: result,
+            error: null
+          });
+        } else {
+          results.push({
+            contractAddress: call.contractAddress,
+            success: false,
+            data: null,
+            error: 'PnL calculation failed'
+          });
+        }
+      } catch (error) {
+        addLog('error', `Error refreshing call: ${call.contractAddress}`, error.message);
+        results.push({
+          contractAddress: call.contractAddress,
+          success: false,
+          error: error.message
+        });
+      }
+    }
+    
+    const successful = results.filter(r => r.success).length;
+    addLog('success', `Bulk refresh completed. ${successful}/${results.length} successful`);
+    res.json({ success: true, data: results });
+  } catch (error) {
+    addLog('error', 'Bulk refresh failed', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Alias for the frontend refresh-all endpoint
+app.post('/api/refresh-all', async (req, res) => {
+  try {
+    addLog('info', 'Starting bulk refresh of all calls (frontend endpoint)');
     
     const calls = cachedCalls.length > 0 ? cachedCalls : await db.getAllActiveCalls();
     const results = [];
@@ -1064,6 +1122,76 @@ app.get('/api/user-profile/:twitterId', async (req, res) => {
     res.json({ success: true, data: profileData });
   } catch (error) {
     addLog('error', 'Failed to fetch user profile', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// Missing API endpoints
+app.get('/api/leaderboard', async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 10;
+    addLog('info', `Fetching leaderboard with limit: ${limit}`);
+    
+    const calls = await db.getAllActiveCalls();
+    
+    // Calculate leaderboard based on PnL performance
+    const leaderboard = calls
+      .filter(call => call.pnlPercent !== undefined && call.pnlPercent !== null)
+      .sort((a, b) => (b.pnlPercent || 0) - (a.pnlPercent || 0))
+      .slice(0, limit)
+      .map((call, index) => ({
+        rank: index + 1,
+        username: call.username || 'Unknown',
+        pnlPercent: call.pnlPercent || 0,
+        score: call.score || 0,
+        tokenSymbol: call.tokenSymbol,
+        contractAddress: call.contractAddress,
+        createdAt: call.createdAt
+      }));
+    
+    addLog('success', `Leaderboard generated with ${leaderboard.length} entries`);
+    res.json({ success: true, data: leaderboard });
+  } catch (error) {
+    addLog('error', 'Failed to fetch leaderboard', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/generate-linking-code', async (req, res) => {
+  try {
+    const { twitterId, twitterUsername, twitterName, profilePictureUrl } = req.body;
+    addLog('info', `Generating linking code for Twitter user: ${twitterUsername}`);
+    
+    // Generate a random 6-digit code
+    const linkingCode = Math.floor(100000 + Math.random() * 900000).toString();
+    
+    // Store the linking code in Firebase
+    const linkingCodesRef = ref(database, 'linkingCodes');
+    const newCodeRef = push(linkingCodesRef);
+    
+    const linkingData = {
+      code: linkingCode,
+      twitterId,
+      twitterUsername,
+      twitterName,
+      profilePictureUrl,
+      isUsed: false,
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() // 24 hours
+    };
+    
+    await set(newCodeRef, linkingData);
+    
+    addLog('success', `Linking code generated: ${linkingCode} for @${twitterUsername}`);
+    res.json({ 
+      success: true, 
+      data: { 
+        linkingCode,
+        expiresIn: 24 * 60 * 60 * 1000 // 24 hours in milliseconds
+      } 
+    });
+  } catch (error) {
+    addLog('error', 'Failed to generate linking code', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
