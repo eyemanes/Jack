@@ -1004,6 +1004,31 @@ app.get('/api/calls', async (req, res) => {
         }
       }
 
+      // Check if user has linked Twitter account
+      let twitterInfo = null;
+      let isLinked = false;
+      try {
+        const linkingCodesRef = ref(database, 'linkingCodes');
+        const linkingSnapshot = await get(linkingCodesRef);
+        const linkingCodes = linkingSnapshot.exists() ? linkingSnapshot.val() : {};
+        
+        // Find linking data for this Telegram username
+        for (const [code, data] of Object.entries(linkingCodes)) {
+          if (data.telegramUsername === call.username && data.isUsed === true) {
+            twitterInfo = {
+              twitterId: data.twitterId,
+              twitterUsername: data.twitterUsername,
+              twitterName: data.twitterName,
+              twitterProfilePic: data.profilePictureUrl
+            };
+            isLinked = true;
+            break;
+          }
+        }
+      } catch (error) {
+        addLog('info', 'Could not check Twitter linking:', error.message);
+      }
+
       return {
         id: call.id,
         contractAddress: call.contractAddress,
@@ -1020,9 +1045,11 @@ app.get('/api/calls', async (req, res) => {
           username: call.username,
           firstName: call.firstName,
           lastName: call.lastName,
-          displayName
+          displayName,
+          isLinked,
+          twitterInfo
         },
-          pnlPercent: call.pnlPercent || 0,
+        pnlPercent: call.pnlPercent || 0,
         score: call.score || 0,
         entryMarketCap: call.entryMarketCap || 0,
         currentMarketCap: call.currentMarketCap || 0,
