@@ -474,29 +474,26 @@ class ImprovedPnlCalculationService {
         // Fetch current token data
         tokenData = await solanaService.getTokenData(call.contractAddress);
         
-        if (tokenData && tokenData.marketCap) {
+        if (tokenData && tokenData.marketCap && !isNaN(parseFloat(tokenData.marketCap))) {
           currentMarketCap = parseFloat(tokenData.marketCap);
+          console.log(`✅ Fetched fresh market cap for ${call.contractAddress}: $${currentMarketCap.toLocaleString()}`);
+        } else {
+          console.log(`⚠️ Invalid token data for ${call.contractAddress}, using stored data`);
         }
       } catch (error) {
-        console.log(`⚠️ Could not fetch fresh token data for ${call.contractAddress}, using stored data`);
+        console.log(`⚠️ Could not fetch fresh token data for ${call.contractAddress}: ${error.message}, using stored data`);
         // Fall back to stored currentMarketCap
       }
 
       if (!currentMarketCap || currentMarketCap <= 0) {
-        return {
-          pnlPercent: 0,
-          pnlType: 'error',
-          reason: 'No valid current market cap data',
-          data: {
-            entryMarketCap,
-            currentMarketCap: 0,
-            tokenData
-          },
-          timestamp: Date.now()
-        };
+        console.log(`⚠️ No valid current market cap for ${call.contractAddress}, using entry market cap`);
+        // If no current market cap, assume no change (0% PnL)
+        currentMarketCap = entryMarketCap;
       }
 
       const pnl = ((currentMarketCap / entryMarketCap) - 1) * 100;
+      
+      console.log(`📊 PnL calculation for ${call.contractAddress}: Entry $${entryMarketCap.toLocaleString()} → Current $${currentMarketCap.toLocaleString()} = ${pnl.toFixed(2)}%`);
       
       return {
         pnlPercent: pnl,
@@ -506,7 +503,7 @@ class ImprovedPnlCalculationService {
           entryMarketCap,
           currentMarketCap,
           pnl,
-          tokenData
+          tokenData: tokenData || null
         },
         timestamp: Date.now()
       };

@@ -159,7 +159,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
       const tokensSnapshot = await get(tokensRef);
       tokensCount = tokensSnapshot.exists() ? tokensSnapshot.size : 0;
       addLog('info', `Fetched ${tokensCount} tokens from database`);
-    } catch (error) {
+        } catch (error) {
       addLog('warning', 'Could not fetch tokens count:', error.message);
     }
     
@@ -193,18 +193,18 @@ app.get('/api/dashboard/calls', async (req, res) => {
     addLog('info', `Fetched ${calls.length} calls from database`);
     
     const transformedCalls = calls.map(call => ({
-      id: call.id,
-      contractAddress: call.contractAddress,
+        id: call.id,
+        contractAddress: call.contractAddress,
       tokenName: call.tokenName,
       tokenSymbol: call.tokenSymbol,
       pnlPercent: call.pnlPercent || 0,
       score: call.score || 0,
       status: call.status || 'active',
-      createdAt: call.createdAt,
-      updatedAt: call.updatedAt,
+        createdAt: call.createdAt,
+        updatedAt: call.updatedAt,
       userId: call.userId,
-      username: call.username,
-      entryMarketCap: call.entryMarketCap,
+          username: call.username,
+          entryMarketCap: call.entryMarketCap,
       currentMarketCap: call.currentMarketCap,
       image: call.image || null
     }));
@@ -249,7 +249,7 @@ app.post('/api/dashboard/refresh/:contractAddress', async (req, res) => {
       addLog('error', `Call not found for contract: ${contractAddress}`);
       return res.status(404).json({ success: false, error: 'Call not found' });
     }
-    
+
     const result = await pnlService.calculateAccuratePnl(call);
     
     if (result.pnlPercent !== undefined) {
@@ -288,7 +288,7 @@ app.post('/api/dashboard/refresh-all', async (req, res) => {
         
         const result = await pnlService.calculateAccuratePnl(call);
         
-        if (result.pnlPercent !== undefined) {
+        if (result && result.pnlPercent !== undefined && !isNaN(result.pnlPercent)) {
           // Update the call in the database with new PnL
           await db.updateCall(call.id, {
             pnlPercent: result.pnlPercent,
@@ -303,11 +303,12 @@ app.post('/api/dashboard/refresh-all', async (req, res) => {
             error: null
           });
         } else {
+          addLog('error', `Invalid PnL result for ${call.contractAddress}:`, result);
           results.push({
             contractAddress: call.contractAddress,
             success: false,
             data: null,
-            error: 'PnL calculation failed'
+            error: `PnL calculation failed: ${result?.reason || 'Unknown error'}`
           });
         }
       } catch (error) {
@@ -346,7 +347,7 @@ app.post('/api/refresh-all', async (req, res) => {
         
         const result = await pnlService.calculateAccuratePnl(call);
         
-        if (result.pnlPercent !== undefined) {
+        if (result && result.pnlPercent !== undefined && !isNaN(result.pnlPercent)) {
           // Update the call in the database with new PnL
           await db.updateCall(call.id, {
             pnlPercent: result.pnlPercent,
@@ -356,16 +357,17 @@ app.post('/api/refresh-all', async (req, res) => {
           
           results.push({
             contractAddress: call.contractAddress,
-            success: true,
+      success: true, 
             data: result,
             error: null
           });
         } else {
+          addLog('error', `Invalid PnL result for ${call.contractAddress}:`, result);
           results.push({
             contractAddress: call.contractAddress,
             success: false,
             data: null,
-            error: 'PnL calculation failed'
+            error: `PnL calculation failed: ${result?.reason || 'Unknown error'}`
           });
         }
       } catch (error) {
@@ -399,7 +401,7 @@ app.post('/api/dashboard/recalculate-all', async (req, res) => {
         addLog('info', `Recalculating call: ${call.contractAddress}`);
         const result = await pnlService.calculateAccuratePnl(call);
         
-        if (result.pnlPercent !== undefined) {
+        if (result && result.pnlPercent !== undefined && !isNaN(result.pnlPercent)) {
           // Update the call in the database with new PnL
           await db.updateCall(call.id, {
             pnlPercent: result.pnlPercent,
@@ -416,7 +418,7 @@ app.post('/api/dashboard/recalculate-all', async (req, res) => {
         } else {
           results.push({
             contractAddress: call.contractAddress,
-            success: false,
+        success: false, 
             data: null,
             error: 'PnL calculation failed'
           });
@@ -425,7 +427,7 @@ app.post('/api/dashboard/recalculate-all', async (req, res) => {
         addLog('error', `Error recalculating call: ${call.contractAddress}`, error.message);
         results.push({
           contractAddress: call.contractAddress,
-          success: false,
+        success: false, 
           error: error.message
         });
       }
@@ -751,7 +753,7 @@ app.get('/', (req, res) => {
                     loadCalls(),
                     loadLogs()
                 ]);
-            } catch (error) {
+  } catch (error) {
                 console.error('Error loading dashboard:', error);
             }
         }
@@ -790,7 +792,7 @@ app.get('/', (req, res) => {
                         </div>
                     \`;
                 }
-            } catch (error) {
+  } catch (error) {
                 console.error('Error loading stats:', error);
             }
         }
@@ -829,7 +831,7 @@ app.get('/', (req, res) => {
                         </tr>
                     \`).join('');
                 }
-            } catch (error) {
+  } catch (error) {
                 console.error('Error loading calls:', error);
             }
         }
@@ -877,13 +879,13 @@ app.get('/', (req, res) => {
                 
                 if (result.success) {
                     showControlStatus(\`Call \${contractAddress} refreshed successfully\`, 'success');
-                } else {
+    } else {
                     showControlStatus(\`Failed to refresh call: \${result.error}\`, 'error');
-                }
-                
+    }
+    
                 // Refresh dashboard after a short delay
                 setTimeout(loadDashboard, 1000);
-            } catch (error) {
+  } catch (error) {
                 showControlStatus(\`Error refreshing call: \${error.message}\`, 'error');
             }
         }
@@ -901,7 +903,7 @@ app.get('/', (req, res) => {
                 }
                 
                 setTimeout(loadDashboard, 2000);
-            } catch (error) {
+  } catch (error) {
                 showControlStatus(\`Error refreshing calls: \${error.message}\`, 'error');
             }
         }
@@ -916,12 +918,12 @@ app.get('/', (req, res) => {
                     const successful = result.data.filter(r => r.success).length;
                     const total = result.data.length;
                     showControlStatus(\`Recalculation completed: \${successful}/\${total} successful\`, 'success');
-                } else {
+    } else {
                     showControlStatus(\`Failed to recalculate: \${result.error}\`, 'error');
-                }
+    }
                 
                 setTimeout(loadDashboard, 2000);
-            } catch (error) {
+  } catch (error) {
                 showControlStatus(\`Error recalculating: \${error.message}\`, 'error');
             }
         }
@@ -1020,7 +1022,7 @@ app.get('/api/calls', async (req, res) => {
           lastName: call.lastName,
           displayName
         },
-        pnlPercent: call.pnlPercent || 0,
+          pnlPercent: call.pnlPercent || 0,
         score: call.score || 0,
         entryMarketCap: call.entryMarketCap || 0,
         currentMarketCap: call.currentMarketCap || 0,
@@ -1091,7 +1093,7 @@ app.get('/api/user-profile/:twitterId', async (req, res) => {
             try {
               const token = await db.findTokenByContractAddress(call.contractAddress);
               tokenImage = token?.image || null;
-            } catch (error) {
+      } catch (error) {
               addLog('info', 'Could not fetch token image for profile:', error.message);
             }
           }
@@ -1124,7 +1126,7 @@ app.get('/api/user-profile/:twitterId', async (req, res) => {
     
     addLog('success', `Profile data calculated for @${linkingData.twitterUsername}:`, profileData);
     res.json({ success: true, data: profileData });
-  } catch (error) {
+      } catch (error) {
     addLog('error', 'Failed to fetch user profile', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
@@ -1138,19 +1140,48 @@ app.get('/api/leaderboard', async (req, res) => {
     
     const calls = await db.getAllActiveCalls();
     
-    // Calculate leaderboard based on PnL performance
-    const leaderboard = calls
-      .filter(call => call.pnlPercent !== undefined && call.pnlPercent !== null)
-      .sort((a, b) => (b.pnlPercent || 0) - (a.pnlPercent || 0))
+    // Group calls by user and calculate stats
+    const userStats = {};
+    
+    calls.forEach(call => {
+      const userId = call.userId || call.username || 'unknown';
+      if (!userStats[userId]) {
+        userStats[userId] = {
+          telegramId: userId,
+          username: call.username || 'Unknown',
+          totalCalls: 0,
+          successfulCalls: 0,
+          totalScore: 0,
+          bestCall: 0,
+          calls: []
+        };
+      }
+      
+      userStats[userId].totalCalls++;
+      userStats[userId].totalScore += parseFloat(call.score || 0);
+      userStats[userId].bestCall = Math.max(userStats[userId].bestCall, call.pnlPercent || 0);
+      userStats[userId].calls.push(call);
+      
+      if ((call.pnlPercent || 0) > 0) {
+        userStats[userId].successfulCalls++;
+      }
+    });
+    
+    // Calculate win rate and create leaderboard
+    const leaderboard = Object.values(userStats)
+      .map(user => ({
+        ...user,
+        winRate: user.totalCalls > 0 ? (user.successfulCalls / user.totalCalls) * 100 : 0,
+        displayName: user.username,
+        isLinked: false, // You can add linking logic here
+        twitterUsername: null,
+        twitterProfilePic: null
+      }))
+      .sort((a, b) => b.totalScore - a.totalScore)
       .slice(0, limit)
-      .map((call, index) => ({
-        rank: index + 1,
-        username: call.username || 'Unknown',
-        pnlPercent: call.pnlPercent || 0,
-        score: call.score || 0,
-        tokenSymbol: call.tokenSymbol,
-        contractAddress: call.contractAddress,
-        createdAt: call.createdAt
+      .map((user, index) => ({
+        ...user,
+        rank: index + 1
       }));
     
     addLog('success', `Leaderboard generated with ${leaderboard.length} entries`);
@@ -1189,7 +1220,7 @@ app.post('/api/generate-linking-code', async (req, res) => {
     addLog('success', `Linking code generated: ${linkingCode} for @${twitterUsername}`);
     res.json({ 
       success: true, 
-      data: { 
+      data: {
         linkingCode,
         expiresIn: 24 * 60 * 60 * 1000 // 24 hours in milliseconds
       } 
