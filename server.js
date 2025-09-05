@@ -26,9 +26,9 @@ app.use(express.json());
 // Initialize Firebase database and service
 const db = new FirebaseService();
 const solanaService = new SolanaTrackerService();
-// Use the bot's PnL calculation service (exact same logic as bot)
-const BotPnlCalculationService = require('./services/BotPnlCalculationService');
-const pnlService = new BotPnlCalculationService();
+// Use the correct PnL calculation service (matches exact user specifications)
+const CorrectPnlCalculationService = require('./services/CorrectPnlCalculationService');
+const pnlService = new CorrectPnlCalculationService();
 
 // Real-time data cache
 let cachedCalls = [];
@@ -250,7 +250,7 @@ app.post('/api/dashboard/refresh/:contractAddress', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Call not found' });
     }
 
-    // Use bot's calculation method
+    // Use improved calculation method
     const result = await pnlService.calculateAccuratePnl(call);
     
     if (result && result.pnlPercent !== undefined && !isNaN(result.pnlPercent)) {
@@ -294,7 +294,7 @@ app.post('/api/dashboard/refresh-all', async (req, res) => {
           await new Promise(resolve => setTimeout(resolve, 4000));
         }
         
-        // Use bot's calculation method
+        // Use improved calculation method
         const result = await pnlService.calculateAccuratePnl(call);
         
         if (result && result.pnlPercent !== undefined && !isNaN(result.pnlPercent)) {
@@ -345,7 +345,7 @@ app.post('/api/dashboard/refresh-all', async (req, res) => {
   }
 });
 
-// Alias for the frontend refresh-all endpoint
+// Alias for the frontend refresh-all endpoint (calls the same logic)
 app.post('/api/refresh-all', async (req, res) => {
   try {
     addLog('info', 'Starting bulk refresh of all calls (frontend endpoint)');
@@ -353,35 +353,45 @@ app.post('/api/refresh-all', async (req, res) => {
     const calls = await db.getAllActiveCalls();
     const results = [];
     
-    for (const call of calls) {
+    for (let i = 0; i < calls.length; i++) {
+      const call = calls[i];
       try {
-        addLog('info', `Refreshing call: ${call.contractAddress}`);
+        addLog('info', `Refreshing call ${i + 1}/${calls.length}: ${call.contractAddress}`);
         
-        // Add 2-second delay for PnL calculation processing
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        // Add 4-second delay between each refresh to avoid rate limiting (same as dashboard)
+        if (i > 0) {
+          await new Promise(resolve => setTimeout(resolve, 4000));
+        }
         
+        // Use correct calculation method
         const result = await pnlService.calculateAccuratePnl(call);
         
         if (result && result.pnlPercent !== undefined && !isNaN(result.pnlPercent)) {
-          // Update the call in the database with new PnL
+          // Update the call in the database with new PnL and maxPnl tracking
+          const currentMaxPnl = parseFloat(call.maxPnl) || 0;
+          const newMaxPnl = Math.max(currentMaxPnl, result.pnlPercent);
+          
           await db.updateCall(call.id, {
             pnlPercent: result.pnlPercent,
+            maxPnl: newMaxPnl,
             currentMarketCap: result.data?.currentMarketCap || call.currentMarketCap,
             updatedAt: new Date().toISOString()
           });
           
           results.push({
             contractAddress: call.contractAddress,
-      success: true, 
-            data: result,
-            error: null
+            success: true,
+            pnlPercent: result.pnlPercent,
+            maxPnl: newMaxPnl,
+            data: result
           });
+          
+          addLog('success', `Call refreshed: ${call.contractAddress}`, result);
         } else {
           addLog('error', `Invalid PnL result for ${call.contractAddress}:`, result);
           results.push({
             contractAddress: call.contractAddress,
             success: false,
-            data: null,
             error: `PnL calculation failed: ${result?.reason || 'Unknown error'}`
           });
         }
@@ -421,7 +431,7 @@ app.post('/api/dashboard/recalculate-all', async (req, res) => {
           await new Promise(resolve => setTimeout(resolve, 3000));
         }
         
-        // Use bot's calculation method
+        // Use improved calculation method
         const result = await pnlService.calculateAccuratePnl(call);
         
         if (result && result.pnlPercent !== undefined && !isNaN(result.pnlPercent)) {
@@ -478,7 +488,7 @@ app.post('/api/dashboard/fix-errors', async (req, res) => {
     
     for (const call of calls) {
       try {
-        // Check if maxPnl needs reset using bot's method
+        // Check if maxPnl needs reset using improved method
         if (pnlService.shouldResetMaxPnl(call)) {
           addLog('info', `Fixing corrupted maxPnl for call: ${call.contractAddress}`);
           

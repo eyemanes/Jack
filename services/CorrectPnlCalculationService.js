@@ -1,94 +1,30 @@
 /**
- * Bot PnL Calculation Service - Exact same logic as the bot
- * Implements the proper PnL calculation rules with ATH tracking
+ * CORRECT PnL Calculation Service - Matches exact user specifications
+ * Implements the precise rules as specified by the user
  */
 
-class BotPnlCalculationService {
+class CorrectPnlCalculationService {
   constructor() {
-    this.cache = new Map(); // Cache for storing max PnL per call
+    this.cache = new Map();
   }
 
   /**
-   * Calculate PnL with proper ATH rules - EXACT SAME AS BOT
-   * @param {Object} input - PnL calculation input
-   * @param {number} input.callTime - Timestamp when token was called
-   * @param {number} input.mcapAtCall - Market cap at call time
-   * @param {number} input.currentMcap - Latest market cap
-   * @param {number} input.athMcap - All-time-high market cap
-   * @param {number} input.athTime - Timestamp of ATH
-   * @param {number} input.maxPnl - Previous maximum PnL (optional)
-   * @returns {number} Calculated PnL percentage
-   */
-  calculatePnl(input) {
-    const { 
-      callTime, 
-      mcapAtCall, 
-      currentMcap, 
-      athMcap, 
-      athTime, 
-      maxPnl = 0 
-    } = input;
-
-    // Validate inputs
-    if (!callTime || !mcapAtCall || !currentMcap || mcapAtCall === 0) {
-      console.log('❌ Invalid PnL input:', input);
-      return 0;
-    }
-
-    const now = Date.now();
-    let pnl = (currentMcap / mcapAtCall) - 1;
-    let peakPnl = maxPnl;
-
-    // Fresh Call Optimization: If call is less than 1 minute old and token is at ATH
-    const fresh = now - callTime < 60_000; // 1 minute
-    const nearAth = athMcap > 0 && Math.abs(currentMcap - athMcap) / athMcap < 0.01; // Within 1%
-
-    console.log(`🔍 Backend PnL Debug:`, {
-      callTime: new Date(callTime).toISOString(),
-      athTime: athTime ? new Date(athTime).toISOString() : 'N/A',
-      fresh,
-      nearAth,
-      currentMcap,
-      athMcap,
-      mcapAtCall
-    });
-
-    // Rule 1: ATH Logic
-    if (athTime > callTime && !(fresh && nearAth)) {
-      // ATH happened after the call → lock PnL at ATH
-      pnl = (athMcap / mcapAtCall) - 1;
-      console.log(`🔒 Backend ATH Rule: Locking PnL at ATH (${(pnl * 100).toFixed(2)}%)`);
-    }
-
-    // Update peak PnL
-    peakPnl = Math.max(peakPnl, pnl);
-
-    // Rule 2: 2x Lock Rule
-    if (peakPnl >= 1.0) {
-      pnl = peakPnl; // Never follow downside after 2x
-      console.log(`🚀 Backend 2x Rule: Locking at peak PnL (${(pnl * 100).toFixed(2)}%)`);
-    }
-
-    // Rule 3: 10x Cap Rule (REMOVED - as per user request)
-    // if (peakPnl >= 9.0) {
-    //   pnl = 9.0; // Cap at 10x (900%)
-    //   console.log(`🎯 Backend 10x Rule: Capping at 10x (${(pnl * 100).toFixed(2)}%)`);
-    // }
-
-    const finalPnlPercent = pnl * 100;
-    console.log(`✅ Backend Final PnL: ${finalPnlPercent.toFixed(2)}%`);
-
-    return finalPnlPercent;
-  }
-
-  /**
-   * Calculate PnL for a call with database integration - EXACT SAME AS BOT
+   * MAIN PnL CALCULATION METHOD - Exact user specifications
    * @param {Object} call - Call object from database
-   * @param {Object} tokenData - Current token data
-   * @returns {number} Calculated PnL percentage
+   * @param {Object} tokenData - Current token data from API
+   * @returns {Object} Calculation result
    */
-  calculatePnlForCall(call, tokenData) {
+  calculatePnl(call, tokenData) {
+    const result = {
+      pnlPercent: 0,
+      maxPnl: 0,
+      isValid: false,
+      calculationType: 'error',
+      debugInfo: {}
+    };
+
     try {
+      // Extract data
       const callTime = new Date(call.createdAt || call.callTime).getTime();
       const mcapAtCall = parseFloat(call.entryMarketCap) || 0;
       const currentMcap = parseFloat(tokenData.marketCap) || 0;
@@ -96,20 +32,88 @@ class BotPnlCalculationService {
       const athTime = tokenData.athTimestamp ? new Date(tokenData.athTimestamp).getTime() : null;
       const maxPnl = parseFloat(call.maxPnl) || 0;
 
-      return this.calculatePnl({
-        callTime,
+      // Validate inputs
+      if (!callTime || !mcapAtCall || !currentMcap || mcapAtCall === 0) {
+        console.error('❌ Invalid PnL input:', { callTime, mcapAtCall, currentMcap });
+        return result;
+      }
+
+      let pnl = (currentMcap / mcapAtCall) - 1;
+      let peakPnl = maxPnl;
+      let calculationType = 'current_price';
+
+      console.log(`🧮 PnL Calculation Debug:`, {
+        callTime: new Date(callTime).toISOString(),
+        athTime: athTime ? new Date(athTime).toISOString() : 'N/A',
         mcapAtCall,
         currentMcap,
         athMcap,
-        athTime,
         maxPnl
       });
+
+      // FRESH CALL OPTIMIZATION: If call is less than 1 minute old, skip ATH-after-call logic
+      const now = Date.now();
+      const fresh = now - callTime < 60_000; // 1 minute
+      const nearAth = athMcap > 0 && Math.abs(currentMcap - athMcap) / athMcap < 0.01; // Within 1%
+
+      console.log(`🕐 Fresh Call Check:`, { fresh, nearAth, timeDiff: now - callTime });
+
+      // RULE 1: ATH Logic
+      if (athTime && athTime > callTime && !(fresh && nearAth)) {
+        // ATH happened after the call → lock PnL at ATH
+        const athPnl = (athMcap / mcapAtCall) - 1;
+        pnl = athPnl;
+        calculationType = 'ath_locked';
+        console.log(`🔒 ATH Rule Applied: Locked at ${(pnl * 100).toFixed(2)}% (ATH after call)`);
+      }
+
+      // Update peak PnL
+      peakPnl = Math.max(peakPnl, pnl);
+
+      // RULE 2: 2x Lock Rule
+      if (peakPnl >= 1.0) { // 1.0 = 2x multiplier (100% gain)
+        pnl = peakPnl; // Never follow downside after 2x
+        calculationType = 'peak_locked_2x';
+        console.log(`🚀 2x Rule Applied: Locked at peak ${(pnl * 100).toFixed(2)}%`);
+      }
+
+      const finalPnlPercent = pnl * 100;
+      console.log(`✅ Final PnL: ${finalPnlPercent.toFixed(2)}% (${calculationType})`);
+
+      result.pnlPercent = finalPnlPercent;
+      result.maxPnl = peakPnl * 100;
+      result.isValid = true;
+      result.calculationType = calculationType;
+      result.debugInfo = {
+        callTime: new Date(callTime).toISOString(),
+        athTime: athTime ? new Date(athTime).toISOString() : null,
+        fresh,
+        nearAth,
+        mcapAtCall,
+        currentMcap,
+        athMcap,
+        peakPnl: peakPnl * 100,
+        calculationType
+      };
+
+      return result;
+
     } catch (error) {
-      console.error('❌ Backend Error in calculatePnlForCall:', error);
-      console.error('Call data:', call);
-      console.error('Token data:', tokenData);
-      return 0; // Return 0 PnL on error
+      console.error(`❌ Error in calculatePnl:`, error);
+      result.debugInfo.error = error.message;
+      return result;
     }
+  }
+
+  /**
+   * Calculate PnL for a call with database integration
+   * @param {Object} call - Call object from database
+   * @param {Object} tokenData - Current token data
+   * @returns {number} Calculated PnL percentage
+   */
+  calculatePnlForCall(call, tokenData) {
+    const result = this.calculatePnl(call, tokenData);
+    return result.isValid ? result.pnlPercent : 0;
   }
 
   /**
@@ -119,7 +123,7 @@ class BotPnlCalculationService {
    */
   async calculateAccuratePnl(call) {
     try {
-      console.log(`🔄 Backend calculating PnL for: ${call.contractAddress}`);
+      console.log(`🔄 Calculating PnL for: ${call.contractAddress}`);
       
       // Add delay to avoid rate limiting
       await this.delay(2000); // 2 second delay
@@ -142,27 +146,29 @@ class BotPnlCalculationService {
         };
       }
 
-      // Use the exact same calculation as the bot
-      const pnlPercent = this.calculatePnlForCall(call, tokenData);
+      // Use the correct calculation method
+      const result = this.calculatePnl(call, tokenData);
       
-      console.log(`📊 Backend PnL calculation for ${call.contractAddress}: ${pnlPercent.toFixed(2)}%`);
+      console.log(`📊 PnL calculation for ${call.contractAddress}: ${result.pnlPercent.toFixed(2)}%`);
       
       return {
-        pnlPercent: pnlPercent,
-        pnlType: 'bot_calculation',
-        reason: 'Using bot calculation system',
+        pnlPercent: result.pnlPercent,
+        pnlType: result.calculationType,
+        reason: 'Using correct calculation system',
         data: {
           entryMarketCap: call.entryMarketCap,
           currentMarketCap: tokenData.marketCap,
           athMarketCap: tokenData.ath,
           athTimestamp: tokenData.athTimestamp,
-          pnl: pnlPercent,
-          tokenData: tokenData
+          pnl: result.pnlPercent,
+          maxPnl: result.maxPnl,
+          tokenData: tokenData,
+          debugInfo: result.debugInfo
         },
         timestamp: Date.now()
       };
     } catch (error) {
-      console.error(`❌ Backend Error in calculateAccuratePnl:`, error);
+      console.error(`❌ Error in calculateAccuratePnl:`, error);
       return {
         pnlPercent: 0,
         pnlType: 'error',
@@ -174,7 +180,7 @@ class BotPnlCalculationService {
   }
 
   /**
-   * Update call with new PnL and store max PnL - EXACT SAME AS BOT
+   * Update call with new PnL and store max PnL
    * @param {Object} call - Call object
    * @param {number} newPnl - New PnL percentage
    * @returns {Object} Updated call object
@@ -192,7 +198,7 @@ class BotPnlCalculationService {
   }
 
   /**
-   * Reset corrupted maxPnl values - EXACT SAME AS BOT
+   * Reset corrupted maxPnl values
    * @param {Object} call - Call object from database
    * @param {Object} tokenData - Current token data (optional)
    * @returns {boolean} True if maxPnl should be reset
@@ -282,4 +288,4 @@ class BotPnlCalculationService {
   }
 }
 
-module.exports = BotPnlCalculationService;
+module.exports = CorrectPnlCalculationService;
