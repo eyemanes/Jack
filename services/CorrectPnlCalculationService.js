@@ -67,14 +67,28 @@ class CorrectPnlCalculationService {
         console.log(`🔒 ATH Rule Applied: Locked at ${(pnl * 100).toFixed(2)}% (ATH after call)`);
       }
 
-      // Update peak PnL
-      peakPnl = Math.max(peakPnl, pnl);
+      // CORRUPTION DETECTION: Check if stored maxPnl is realistic
+      const maxPossiblePnl = Math.max(
+        ((currentMcap / mcapAtCall) - 1),
+        athMcap > 0 ? ((athMcap / mcapAtCall) - 1) : 0
+      );
+      
+      const isCorrupted = maxPnl > maxPossiblePnl * 1.5; // If maxPnl is 1.5x higher than possible, it's corrupted
+      
+      if (isCorrupted) {
+        console.log(`🚨 CORRUPTION DETECTED: maxPnl ${(maxPnl * 100).toFixed(2)}% exceeds possible ${(maxPossiblePnl * 100).toFixed(2)}%`);
+        peakPnl = pnl; // Reset to current PnL
+      } else {
+        peakPnl = Math.max(peakPnl, pnl); // Use stored peak if not corrupted
+      }
 
-      // RULE 2: 2x Lock Rule
+      // RULE 2: 2x Lock Rule - Only apply if we have a valid 2x+ peak
       if (peakPnl >= 1.0) { // 1.0 = 2x multiplier (100% gain)
-        pnl = peakPnl; // Never follow downside after 2x
+        pnl = peakPnl; // Lock at peak (never follow downside after 2x)
         calculationType = 'peak_locked_2x';
-        console.log(`🚀 2x Rule Applied: Locked at peak ${(pnl * 100).toFixed(2)}%`);
+        console.log(`🚀 2x Rule Applied: Locked at peak ${(pnl * 100).toFixed(2)}% (valid 2x+ peak)`);
+      } else {
+        console.log(`📊 No 2x+ peak found, using current PnL ${(pnl * 100).toFixed(2)}%`);
       }
 
       const finalPnlPercent = pnl * 100;
@@ -216,7 +230,7 @@ class CorrectPnlCalculationService {
         if (currentMcap <= 0) return false;
         
         const maxPossiblePnl = ((currentMcap / entryMcap) - 1) * 100;
-        return maxPnl > maxPossiblePnl * 2;
+        return maxPnl > maxPossiblePnl * 1.5; // More sensitive detection
       }
       
       const currentMcap = parseFloat(tokenData.marketCap) || 0;
@@ -229,11 +243,50 @@ class CorrectPnlCalculationService {
         athMcap > 0 ? ((athMcap / entryMcap) - 1) * 100 : 0
       );
       
-      // If maxPnl is more than 2x the maximum possible PnL, it's corrupted
-      return maxPnl > maxPossiblePnl * 2;
+      // If maxPnl is more than 1.5x the maximum possible PnL, it's corrupted
+      return maxPnl > maxPossiblePnl * 1.5;
     } catch (error) {
       console.error('❌ Error in shouldResetMaxPnl:', error);
       return false;
+    }
+  }
+
+  /**
+   * Fix corrupted maxPnl values in database
+   * @param {Object} call - Call object from database
+   * @param {Object} tokenData - Current token data
+   * @returns {Object} Fixed call object
+   */
+  fixCorruptedMaxPnl(call, tokenData) {
+    try {
+      const maxPnl = parseFloat(call.maxPnl) || 0;
+      const entryMcap = parseFloat(call.entryMarketCap) || 0;
+      const currentMcap = parseFloat(tokenData.marketCap) || 0;
+      const athMcap = parseFloat(tokenData.ath) || 0;
+      
+      if (maxPnl <= 0 || entryMcap <= 0) return call;
+      
+      const maxPossiblePnl = Math.max(
+        ((currentMcap / entryMcap) - 1) * 100,
+        athMcap > 0 ? ((athMcap / entryMcap) - 1) * 100 : 0
+      );
+      
+      // If maxPnl is corrupted, reset it to current PnL
+      if (maxPnl > maxPossiblePnl * 1.5) {
+        console.log(`🔧 FIXING CORRUPTED maxPnl: ${maxPnl.toFixed(2)}% → ${maxPossiblePnl.toFixed(2)}%`);
+        return {
+          ...call,
+          maxPnl: maxPossiblePnl,
+          corruptionFixed: true,
+          corruptionFixedAt: new Date().toISOString(),
+          previousCorruptedMaxPnl: maxPnl
+        };
+      }
+      
+      return call;
+    } catch (error) {
+      console.error('❌ Error in fixCorruptedMaxPnl:', error);
+      return call;
     }
   }
 

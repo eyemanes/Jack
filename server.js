@@ -250,19 +250,27 @@ app.post('/api/dashboard/refresh/:contractAddress', async (req, res) => {
       return res.status(404).json({ success: false, error: 'Call not found' });
     }
 
-    // Use improved calculation method
+    // Use correct calculation method
     const result = await pnlService.calculateAccuratePnl(call);
     
     if (result && result.pnlPercent !== undefined && !isNaN(result.pnlPercent)) {
+      // Check for corruption and fix if needed
+      const fixedCall = pnlService.fixCorruptedMaxPnl(call, result.data?.tokenData);
+      
       // Update the call in the database with new PnL and maxPnl tracking
-      const currentMaxPnl = parseFloat(call.maxPnl) || 0;
+      const currentMaxPnl = parseFloat(fixedCall.maxPnl) || 0;
       const newMaxPnl = Math.max(currentMaxPnl, result.pnlPercent);
       
       await db.updateCall(call.id, {
         pnlPercent: result.pnlPercent,
         maxPnl: newMaxPnl,
         currentMarketCap: result.data?.currentMarketCap || call.currentMarketCap,
-        updatedAt: new Date().toISOString()
+        updatedAt: new Date().toISOString(),
+        ...(fixedCall.corruptionFixed && {
+          corruptionFixed: true,
+          corruptionFixedAt: fixedCall.corruptionFixedAt,
+          previousCorruptedMaxPnl: fixedCall.previousCorruptedMaxPnl
+        })
       });
       
       addLog('success', `Token refreshed successfully: ${contractAddress}`, result);
@@ -363,20 +371,28 @@ app.post('/api/refresh-all', async (req, res) => {
           await new Promise(resolve => setTimeout(resolve, 4000));
         }
         
-        // Use correct calculation method
-        const result = await pnlService.calculateAccuratePnl(call);
-        
-        if (result && result.pnlPercent !== undefined && !isNaN(result.pnlPercent)) {
-          // Update the call in the database with new PnL and maxPnl tracking
-          const currentMaxPnl = parseFloat(call.maxPnl) || 0;
-          const newMaxPnl = Math.max(currentMaxPnl, result.pnlPercent);
-          
-          await db.updateCall(call.id, {
-            pnlPercent: result.pnlPercent,
-            maxPnl: newMaxPnl,
-            currentMarketCap: result.data?.currentMarketCap || call.currentMarketCap,
-            updatedAt: new Date().toISOString()
-          });
+            // Use correct calculation method
+    const result = await pnlService.calculateAccuratePnl(call);
+    
+    if (result && result.pnlPercent !== undefined && !isNaN(result.pnlPercent)) {
+      // Check for corruption and fix if needed
+      const fixedCall = pnlService.fixCorruptedMaxPnl(call, result.data?.tokenData);
+      
+      // Update the call in the database with new PnL and maxPnl tracking
+      const currentMaxPnl = parseFloat(fixedCall.maxPnl) || 0;
+      const newMaxPnl = Math.max(currentMaxPnl, result.pnlPercent);
+      
+      await db.updateCall(call.id, {
+        pnlPercent: result.pnlPercent,
+        maxPnl: newMaxPnl,
+        currentMarketCap: result.data?.currentMarketCap || call.currentMarketCap,
+        updatedAt: new Date().toISOString(),
+        ...(fixedCall.corruptionFixed && {
+          corruptionFixed: true,
+          corruptionFixedAt: fixedCall.corruptionFixedAt,
+          previousCorruptedMaxPnl: fixedCall.previousCorruptedMaxPnl
+        })
+      });
           
           results.push({
             contractAddress: call.contractAddress,
@@ -481,34 +497,48 @@ app.post('/api/dashboard/recalculate-all', async (req, res) => {
 
 app.post('/api/dashboard/fix-errors', async (req, res) => {
   try {
-    addLog('info', 'Starting error fixing process');
+    addLog('info', 'Starting corruption fixing process');
     
     const calls = await db.getAllActiveCalls();
     const fixedCalls = [];
     
     for (const call of calls) {
       try {
-        // Check if maxPnl needs reset using improved method
-        if (pnlService.shouldResetMaxPnl(call)) {
-          addLog('info', `Fixing corrupted maxPnl for call: ${call.contractAddress}`);
-          
-          // Reset maxPnl to current PnL
-          const currentPnl = call.pnlPercent || 0;
-          await db.updateCall(call.id, { maxPnl: currentPnl });
-          
-          fixedCalls.push({
-            contractAddress: call.contractAddress,
-            fixed: 'maxPnl',
-            oldValue: call.maxPnl,
-            newValue: currentPnl
-          });
+        // Get fresh token data to check for corruption
+        const SolanaTrackerService = require('./services/SolanaTrackerService');
+        const solanaService = new SolanaTrackerService();
+        const tokenData = await solanaService.getTokenData(call.contractAddress);
+        
+        if (tokenData) {
+          // Check if maxPnl needs reset using corruption detection
+          if (pnlService.shouldResetMaxPnl(call, tokenData)) {
+            addLog('info', `Fixing corrupted maxPnl for call: ${call.contractAddress}`);
+            
+            // Fix corrupted maxPnl
+            const fixedCall = pnlService.fixCorruptedMaxPnl(call, tokenData);
+            
+            await db.updateCall(call.id, {
+              maxPnl: fixedCall.maxPnl,
+              corruptionFixed: true,
+              corruptionFixedAt: fixedCall.corruptionFixedAt,
+              previousCorruptedMaxPnl: fixedCall.previousCorruptedMaxPnl
+            });
+            
+            fixedCalls.push({
+              contractAddress: call.contractAddress,
+              fixed: 'maxPnl',
+              oldValue: call.maxPnl,
+              newValue: fixedCall.maxPnl,
+              reason: 'Corruption detected and fixed'
+            });
+          }
         }
       } catch (error) {
         addLog('error', `Error fixing call: ${call.contractAddress}`, error.message);
       }
     }
     
-    addLog('success', `Error fixing completed. Fixed ${fixedCalls.length} calls`);
+    addLog('success', `Corruption fixing completed. Fixed ${fixedCalls.length} calls`);
     res.json({ success: true, data: fixedCalls });
   } catch (error) {
     addLog('error', 'Error fixing process failed', error.message);
