@@ -1,0 +1,31 @@
+{
+  "rules": {
+    "calls": {
+      ".read": true,
+      ".write": true,
+      ".indexOn": ["token", "callerId", "groupId", "status", "tsCall"]
+    },
+    "callIndexByToken": {
+      ".read": true,
+      ".write": true
+    },
+    "callIndexByGroup": {
+      ".read": true,
+      ".write": true
+    },
+    "callerStats": {
+      ".read": true,
+      ".write": true,
+      ".indexOn": ["totals.calls", "bestMultiplier", "lastUpdated"]
+    },
+    "linkingCodes": {
+      ".read": true,
+      ".write": true,
+      ".indexOn": ["expiresAt"]
+    },
+    "queues": {
+      ".read": true,
+      ".write": true
+    }
+  }
+}
